@@ -2,8 +2,8 @@
 # Pairwise falsification diagnostic and DID analysis
 # "Identifying Item Bias Without Conditioning: A Difference-in-Differences Approach"
 #
-# Run this script from the repository root after
-# R/empirical/01_conventional_dif_screening.R.
+# Run this script from the repository root after:
+#   R/empirical/01_conventional_dif_screening.R
 
 if (!requireNamespace("sandwich", quietly = TRUE)) {
   stop(
@@ -33,131 +33,156 @@ if (!file.exists(SCREENING_FILE)) {
   )
 }
 
-dat <- read.csv(
+dat <- utils::read.csv(
   DATA_FILE,
   check.names = FALSE,
   stringsAsFactors = FALSE
 )
 
-screening <- read.csv(
+screening <- utils::read.csv(
   SCREENING_FILE,
   check.names = FALSE,
   stringsAsFactors = FALSE
 )
 
+ITEM_NAMES <- c(
+  "C601C06S",
+  "C815P001S",
+  "C815P002S",
+  "C832P001S",
+  "C832P002S",
+  "C813P001S",
+  "C833P001S",
+  "C833P002S"
+)
+
+ALPHA_LEVEL <- 0.05
+CONFIDENCE_LEVEL <- 0.95
+
 candidate_anchors <- screening$Item[
   screening$Candidate_anchor
 ]
 
-test_items <- screening$Item[
-  !screening$Candidate_anchor
-]
+test_items <- setdiff(
+  ITEM_NAMES,
+  candidate_anchors
+)
 
-if (length(candidate_anchors) == 0) {
+if (length(candidate_anchors) == 0L) {
   stop("No candidate anchors were retained by the screening stage.")
 }
 
-if (length(test_items) == 0) {
+if (length(test_items) == 0L) {
   stop("No test items remain after candidate-anchor screening.")
 }
 
-ALPHA_LEVEL <- 0.05
 
-
-# -------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 # HC3 regression for one anchor--test pair
-# -------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 
-analyze_pair <- function(test_item, anchor_item, data) {
+analyze_pair <- function(
+    test_item,
+    anchor_item,
+    data,
+    confidence_level = CONFIDENCE_LEVEL
+) {
   pair_data <- data.frame(
     G = as.integer(data$G),
-    D = data[[test_item]] - data[[anchor_item]]
+    response_difference =
+      data[[test_item]] - data[[anchor_item]]
   )
 
-  fit <- lm(D ~ G, data = pair_data)
+  fit <- stats::lm(
+    response_difference ~ G,
+    data = pair_data
+  )
 
-  V_hc3 <- sandwich::vcovHC(
+  robust_vcov <- sandwich::vcovHC(
     fit,
     type = "HC3"
   )
 
-  estimates <- coef(fit)
-  ses <- sqrt(diag(V_hc3))
+  estimates <- stats::coef(fit)
+  robust_se <- sqrt(diag(robust_vcov))
 
-  df <- df.residual(fit)
-  critical <- qt(0.975, df = df)
+  residual_df <- stats::df.residual(fit)
 
-  t_stats <- estimates / ses
-  p_values <- 2 * pt(
-    abs(t_stats),
-    df = df,
-    lower.tail = FALSE
+  critical_value <- stats::qt(
+    1 - (1 - confidence_level) / 2,
+    df = residual_df
   )
 
-  ci_lower <- estimates - critical * ses
-  ci_upper <- estimates + critical * ses
+  robust_p_value <- function(estimate, se) {
+    statistic <- estimate / se
 
-  # Intercept = alpha = E(Y_T - Y_A | G = 0)
-  alpha_hat <- unname(estimates["(Intercept)"])
-  se_alpha <- unname(ses["(Intercept)"])
-  p_alpha <- unname(p_values["(Intercept)"])
+    2 * stats::pt(
+      abs(statistic),
+      df = residual_df,
+      lower.tail = FALSE
+    )
+  }
 
-  # Group coefficient = DID
-  did_hat <- unname(estimates["G"])
-  se_did <- unname(ses["G"])
-  p_did <- unname(p_values["G"])
+  alpha_estimate <- unname(estimates["(Intercept)"])
+  alpha_se <- unname(robust_se["(Intercept)"])
+  alpha_p <- robust_p_value(alpha_estimate, alpha_se)
+
+  did_estimate <- unname(estimates["G"])
+  did_se <- unname(robust_se["G"])
+  did_p <- robust_p_value(did_estimate, did_se)
 
   data.frame(
     Test_item = test_item,
     Anchor_item = anchor_item,
-    alpha = alpha_hat,
-    SE_alpha = se_alpha,
-    p_alpha = p_alpha,
+    N = nrow(pair_data),
+    alpha = alpha_estimate,
+    SE_alpha = alpha_se,
+    CI_alpha_lower = alpha_estimate - critical_value * alpha_se,
+    CI_alpha_upper = alpha_estimate + critical_value * alpha_se,
+    p_alpha = alpha_p,
     Diagnostic = ifelse(
-      p_alpha < ALPHA_LEVEL,
-      "Rejected",
-      "Did not reject"
+      !is.na(alpha_p) & alpha_p >= ALPHA_LEVEL,
+      "Did not reject",
+      "Rejected"
     ),
-    DID = did_hat,
-    SE_DID = se_did,
-    CI_lower = unname(ci_lower["G"]),
-    CI_upper = unname(ci_upper["G"]),
-    p_DID = p_did,
+    DID = did_estimate,
+    SE_DID = did_se,
+    CI_lower = did_estimate - critical_value * did_se,
+    CI_upper = did_estimate + critical_value * did_se,
+    p_DID = did_p,
     stringsAsFactors = FALSE
   )
 }
 
 
-# -------------------------------------------------------------------------
-# Analyze every test-item x candidate-anchor pair
-# -------------------------------------------------------------------------
-
-pair_grid <- expand.grid(
-  Test_item = test_items,
-  Anchor_item = candidate_anchors,
-  stringsAsFactors = FALSE
-)
+# ------------------------------------------------------------------------------
+# Analyze every remaining test item x candidate anchor pair
+# ------------------------------------------------------------------------------
 
 pair_results <- do.call(
   rbind,
-  lapply(seq_len(nrow(pair_grid)), function(i) {
-    analyze_pair(
-      test_item = pair_grid$Test_item[i],
-      anchor_item = pair_grid$Anchor_item[i],
-      data = dat
+  lapply(test_items, function(test_item) {
+    do.call(
+      rbind,
+      lapply(candidate_anchors, function(anchor_item) {
+        analyze_pair(
+          test_item = test_item,
+          anchor_item = anchor_item,
+          data = dat
+        )
+      })
     )
   })
 )
 
-# Order results by the test-item order from the screening table, then anchor.
 pair_results$Test_item <- factor(
   pair_results$Test_item,
-  levels = test_items
+  levels = ITEM_NAMES
 )
 
 pair_results$Anchor_item <- factor(
   pair_results$Anchor_item,
-  levels = candidate_anchors
+  levels = ITEM_NAMES
 )
 
 pair_results <- pair_results[
@@ -175,7 +200,7 @@ dir.create(
   showWarnings = FALSE
 )
 
-write.csv(
+utils::write.csv(
   pair_results,
   file.path(
     "results", "empirical", "pairwise_falsification_did.csv"
@@ -184,7 +209,7 @@ write.csv(
 )
 
 writeLines(
-  capture.output(sessionInfo()),
+  capture.output(utils::sessionInfo()),
   con = file.path(
     "results", "empirical", "sessionInfo_pairwise_did.txt"
   )
