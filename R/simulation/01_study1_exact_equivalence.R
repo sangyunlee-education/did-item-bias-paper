@@ -1,8 +1,7 @@
 # 01_study1_exact_equivalence.R
 # Study 1: Finite-Sample Inference Under Exact Identification
 #
-# This script preserves the condition ordering and condition-specific seeds
-# used to generate the manuscript results.
+# Reproduces Study 1 results reported in the manuscript.
 # Run from the repository root.
 
 source(file.path("R", "simulation", "00_helpers.R"))
@@ -10,7 +9,7 @@ source(file.path("R", "simulation", "00_helpers.R"))
 cat("Preparing Study 1 conditions...\n")
 
 # -----------------------------------------------------------------------------
-# Calibrate delta_T exactly as in the original simulation script
+# Calibrate delta_T
 # -----------------------------------------------------------------------------
 
 study1_delta_table <- expand.grid(
@@ -56,7 +55,7 @@ write.csv(
 )
 
 # -----------------------------------------------------------------------------
-# Build the 81 conditions in the ORIGINAL order
+# Build the 81 simulation conditions
 # -----------------------------------------------------------------------------
 
 study1_grid <- expand.grid(
@@ -85,7 +84,6 @@ study1_grid <- study1_grid[order(
 row.names(study1_grid) <- NULL
 study1_grid$condition_id <- seq_len(nrow(study1_grid))
 
-# DO NOT CHANGE: this is the original manuscript condition-seed rule.
 study1_grid$condition_seed <-
   SETTINGS$seed + study1_grid$condition_id * 1013L
 
