@@ -2,12 +2,7 @@
 # Helper functions for the Monte Carlo simulation studies
 # "Identifying Item Bias Without Conditioning: A Difference-in-Differences Approach"
 #
-# IMPORTANT FOR REPRODUCTION
-# This file preserves the random-number generation logic used in the original
-# simulation script that generated the results reported in the manuscript.
-# In particular, it preserves the original base seed, block size, latent-trait
-# generators, binary-response generator, and HC3 calculations.
-
+# Helper functions and settings for the two Monte Carlo simulation studies.
 options(stringsAsFactors = FALSE)
 
 # -----------------------------------------------------------------------------
@@ -234,8 +229,7 @@ generate_binary_pair <- function(p_a, p_t, rho) {
     stop("rho must lie strictly between -1 and 1.")
   }
 
-  # Do not change the order of these random draws if exact reproduction of
-  # the manuscript simulation is desired.
+  # Preserve draw order for exact reproduction.
   z_a <- rnorm(length(p_a))
   z_t <- rho * z_a + sqrt(1 - rho^2) * rnorm(length(p_a))
 
@@ -287,7 +281,7 @@ simulate_blocks <- function(
     indices <- start:end
     block_size <- length(indices)
 
-    # Do not change this draw order if exact reproduction is desired.
+    # Preserve draw order for exact reproduction.
     theta0 <- r_theta_reference(n0 * block_size)
     theta1 <- r_theta_focal(n1 * block_size)
 
