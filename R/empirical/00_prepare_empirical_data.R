@@ -3,28 +3,48 @@
 # "Identifying Item Bias Without Conditioning: A Difference-in-Differences Approach"
 #
 # Run this script from the repository root.
-#
-# IMPORTANT:
-# The manuscript specifies the eight locator-test items and the final coding
-# (correct = 1; incorrect/omission = 0), but it does not record the exact
-# raw-PUF gender variable name or all raw response codes. Complete the
-# CONFIGURATION block below using the OECD PIAAC Cycle 2 Korea PUF/codebook.
 
-# -------------------------------------------------------------------------
-# CONFIGURATION: edit these values once for the raw PUF you are using
-# -------------------------------------------------------------------------
+required_packages <- c("dplyr", "tidyr")
 
-RAW_DATA_FILE <- file.path("data", "piaac_cycle2_korea.csv")
+missing_packages <- required_packages[
+  !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
+]
 
-# Replace with the exact gender/sex variable name in the PUF.
-GROUP_VARIABLE <- "REPLACE_WITH_GROUP_VARIABLE"
+if (length(missing_packages) > 0L) {
+  stop(
+    "Install the following packages before running this script: ",
+    paste(missing_packages, collapse = ", ")
+  )
+}
 
-# Replace with the raw values identifying males and females.
-# Character and numeric codes are both supported.
-REFERENCE_VALUE <- "REPLACE_WITH_MALE_VALUE"
-FOCAL_VALUE <- "REPLACE_WITH_FEMALE_VALUE"
+# ------------------------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------------------------
 
-# The manuscript analysis uses these eight Numeracy locator-test items.
+# Preferred GitHub/repository location for the raw Korea PIAAC Cycle 2 file.
+# For convenience, the script also accepts prgkorp2.csv in the repository root.
+RAW_DATA_CANDIDATES <- c(
+  file.path("data", "piaac", "prgkorp2.csv"),
+  "prgkorp2.csv"
+)
+
+existing_data_files <- RAW_DATA_CANDIDATES[file.exists(RAW_DATA_CANDIDATES)]
+
+if (length(existing_data_files) == 0L) {
+  stop(
+    "PIAAC data file not found.\n",
+    "Place prgkorp2.csv at data/piaac/prgkorp2.csv ",
+    "or in the repository root."
+  )
+}
+
+RAW_DATA_FILE <- existing_data_files[1L]
+DELIMITER <- ";"
+
+GROUP_VARIABLE <- "GENDER_R"
+REFERENCE_VALUE <- 1
+FOCAL_VALUE <- 2
+
 ITEM_NAMES <- c(
   "C601C06S",
   "C815P001S",
@@ -36,111 +56,103 @@ ITEM_NAMES <- c(
   "C833P002S"
 )
 
-# Final analysis coding required by the manuscript:
-#   correct response             -> 1
-#   incorrect response/omission  -> 0
-#
-# If the raw PUF variables are already coded 0/1, leave these as written.
-# Otherwise replace these vectors with the exact raw codes from the codebook.
-CORRECT_VALUES <- c(1)
-INCORRECT_OR_OMISSION_VALUES <- c(0)
+# Raw PIAAC score coding used in the analysis.
+CORRECT_VALUES <- "1"
+INCORRECT_OR_OMISSION_VALUES <- c("0", "7")
 
-# Any values not included above are set to NA and are excluded by the
-# complete-case rule.
-# -------------------------------------------------------------------------
+# Manuscript sample counts.
+EXPECTED_N <- 5780L
+EXPECTED_REFERENCE_N <- 2715L
+EXPECTED_FOCAL_N <- 3065L
 
 
-# -------------------------------------------------------------------------
-# Read raw PUF
-# -------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Read and recode the raw PIAAC file
+# ------------------------------------------------------------------------------
 
-if (!file.exists(RAW_DATA_FILE)) {
-  stop(
-    "Raw data file not found: ", RAW_DATA_FILE,
-    "\nPlace the Korea PIAAC Cycle 2 CSV PUF in data/ or edit RAW_DATA_FILE."
-  )
-}
-
-raw <- read.csv(
+raw_data <- utils::read.csv(
   RAW_DATA_FILE,
+  sep = DELIMITER,
+  header = TRUE,
   check.names = FALSE,
   stringsAsFactors = FALSE
 )
 
-required_columns <- c(GROUP_VARIABLE, ITEM_NAMES)
-missing_columns <- setdiff(required_columns, names(raw))
+required_variables <- c(GROUP_VARIABLE, ITEM_NAMES)
+missing_variables <- setdiff(required_variables, names(raw_data))
 
-if (length(missing_columns) > 0) {
+if (length(missing_variables) > 0L) {
   stop(
-    "The following required columns were not found:\n",
-    paste(missing_columns, collapse = ", ")
+    "The following required variables are missing: ",
+    paste(missing_variables, collapse = ", ")
   )
 }
 
+analysis_data <- raw_data |>
+  dplyr::select(
+    dplyr::all_of(GROUP_VARIABLE),
+    dplyr::all_of(ITEM_NAMES)
+  ) |>
+  dplyr::mutate(
+    G = dplyr::case_when(
+      .data[[GROUP_VARIABLE]] == REFERENCE_VALUE ~ 0L,
+      .data[[GROUP_VARIABLE]] == FOCAL_VALUE ~ 1L,
+      TRUE ~ NA_integer_
+    )
+  ) |>
+  dplyr::select(-dplyr::all_of(GROUP_VARIABLE)) |>
+  dplyr::mutate(
+    dplyr::across(
+      dplyr::all_of(ITEM_NAMES),
+      ~ dplyr::case_when(
+        as.character(.x) %in% CORRECT_VALUES ~ 1,
+        as.character(.x) %in% INCORRECT_OR_OMISSION_VALUES ~ 0,
+        TRUE ~ NA_real_
+      )
+    )
+  ) |>
+  tidyr::drop_na()
 
-# -------------------------------------------------------------------------
-# Recode group membership
-# -------------------------------------------------------------------------
+observed_groups <- sort(unique(analysis_data$G))
 
-raw_group <- raw[[GROUP_VARIABLE]]
-
-G <- rep(NA_integer_, length(raw_group))
-G[as.character(raw_group) == as.character(REFERENCE_VALUE)] <- 0L
-G[as.character(raw_group) == as.character(FOCAL_VALUE)] <- 1L
-
-
-# -------------------------------------------------------------------------
-# Recode item responses
-# -------------------------------------------------------------------------
-
-recode_binary_item <- function(x) {
-  out <- rep(NA_integer_, length(x))
-
-  out[as.character(x) %in% as.character(CORRECT_VALUES)] <- 1L
-  out[
-    as.character(x) %in% as.character(INCORRECT_OR_OMISSION_VALUES)
-  ] <- 0L
-
-  out
-}
-
-items <- as.data.frame(
-  lapply(raw[ITEM_NAMES], recode_binary_item),
-  check.names = FALSE
-)
-
-analysis_data <- data.frame(
-  G = G,
-  items,
-  check.names = FALSE
-)
-
-
-# -------------------------------------------------------------------------
-# Complete-case analytic sample
-# -------------------------------------------------------------------------
-
-analysis_data <- analysis_data[
-  complete.cases(analysis_data[, c("G", ITEM_NAMES)]),
-  c("G", ITEM_NAMES)
-]
-
-row.names(analysis_data) <- NULL
-
-if (!all(analysis_data$G %in% c(0L, 1L))) {
-  stop("G must contain only 0 (reference) and 1 (focal) after recoding.")
-}
-
-for (item in ITEM_NAMES) {
-  if (!all(analysis_data[[item]] %in% c(0L, 1L))) {
-    stop("Item ", item, " is not binary after recoding.")
-  }
+if (!identical(observed_groups, c(0L, 1L))) {
+  stop("Both reference (G = 0) and focal (G = 1) groups must be present.")
 }
 
 
-# -------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Check the analytic sample against the manuscript
+# ------------------------------------------------------------------------------
+
+n_total <- nrow(analysis_data)
+n_reference <- sum(analysis_data$G == 0L)
+n_focal <- sum(analysis_data$G == 1L)
+
+cat("\nPrepared empirical analysis data\n")
+cat("--------------------------------\n")
+cat("Raw file:   ", RAW_DATA_FILE, "\n", sep = "")
+cat("Total N:    ", n_total, "\n", sep = "")
+cat("Reference:  ", n_reference, "\n", sep = "")
+cat("Focal:      ", n_focal, "\n", sep = "")
+
+if (
+  n_total != EXPECTED_N ||
+  n_reference != EXPECTED_REFERENCE_N ||
+  n_focal != EXPECTED_FOCAL_N
+) {
+  stop(
+    "\nThe analytic sample does not match the manuscript.\n",
+    "Expected N = 5780, reference = 2715, focal = 3065.\n",
+    "Check that the correct Korea PIAAC Cycle 2 file is being used."
+  )
+}
+
+cat("Sample check: PASS\n\n")
+
+
+# ------------------------------------------------------------------------------
 # Save derived analysis data
-# -------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 
 dir.create(
   file.path("data", "derived"),
@@ -152,31 +164,10 @@ OUTPUT_FILE <- file.path(
   "data", "derived", "piaac_korea_locator_analysis.csv"
 )
 
-write.csv(
+utils::write.csv(
   analysis_data,
   OUTPUT_FILE,
   row.names = FALSE
 )
 
-cat("\nPrepared empirical analysis data\n")
-cat("--------------------------------\n")
-cat("Total N:    ", nrow(analysis_data), "\n", sep = "")
-cat("Reference:  ", sum(analysis_data$G == 0), "\n", sep = "")
-cat("Focal:      ", sum(analysis_data$G == 1), "\n", sep = "")
-cat("Saved to:   ", OUTPUT_FILE, "\n\n", sep = "")
-
-# Values reported in the manuscript:
-EXPECTED_N <- 5780L
-EXPECTED_REFERENCE_N <- 2715L
-EXPECTED_FOCAL_N <- 3065L
-
-if (
-  nrow(analysis_data) != EXPECTED_N ||
-  sum(analysis_data$G == 0) != EXPECTED_REFERENCE_N ||
-  sum(analysis_data$G == 1) != EXPECTED_FOCAL_N
-) {
-  warning(
-    "The analytic sample counts do not match the manuscript. ",
-    "Check the raw group and item-response coding before proceeding."
-  )
-}
+cat("Saved to: ", OUTPUT_FILE, "\n", sep = "")
