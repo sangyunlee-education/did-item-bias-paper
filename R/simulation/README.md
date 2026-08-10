@@ -25,7 +25,9 @@ source("R/simulation/02_study2_falsification_diagnostic.R")
 source("R/simulation/03_summarize_simulation_results.R")
 ```
 
-Each simulation condition uses 5,000 Monte Carlo replications. For a quick check before the full run, temporarily change `N_REP <- 5000L` to a smaller value such as `50L` in the Study 1 and Study 2 scripts.
+Each simulation condition uses 5,000 Monte Carlo replications.
+For a quick code check, set `quick_test = TRUE` in
+`R/simulation/00_helpers.R`.
 
 Outputs are written automatically to:
 
