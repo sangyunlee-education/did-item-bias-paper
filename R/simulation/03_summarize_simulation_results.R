@@ -1,5 +1,5 @@
 # 03_summarize_simulation_results.R
-# Summarize the Study 1 and Study 2 results in the CURRENT manuscript format.
+# Summarize Study 1 and Study 2 results in the manuscript format.
 #
 # Run this script after:
 #   R/simulation/01_study1_exact_equivalence.R
