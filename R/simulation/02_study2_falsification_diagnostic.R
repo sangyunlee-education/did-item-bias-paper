@@ -1,8 +1,7 @@
 # 02_study2_falsification_diagnostic.R
 # Study 2: Estimation and Inference for the Falsification Diagnostic
 #
-# This script preserves the condition ordering and condition-specific seeds
-# used to generate the manuscript results.
+# Reproduces Study 2 results reported in the manuscript.
 # Run from the repository root.
 
 source(file.path("R", "simulation", "00_helpers.R"))
@@ -10,7 +9,7 @@ source(file.path("R", "simulation", "00_helpers.R"))
 cat("Preparing Study 2 conditions...\n")
 
 # -----------------------------------------------------------------------------
-# Calibrate c(alpha) exactly as in the original simulation script
+# Calibrate c(alpha)
 # -----------------------------------------------------------------------------
 
 shift_table <- data.frame(
@@ -42,7 +41,7 @@ write.csv(
 )
 
 # -----------------------------------------------------------------------------
-# Build the 81 conditions in the ORIGINAL order
+# Build the 81 simulation conditions
 # -----------------------------------------------------------------------------
 
 study2_grid <- expand.grid(
@@ -70,7 +69,6 @@ study2_grid <- study2_grid[order(
 row.names(study2_grid) <- NULL
 study2_grid$condition_id <- seq_len(nrow(study2_grid))
 
-# DO NOT CHANGE: this is the original manuscript condition-seed rule.
 study2_grid$condition_seed <-
   SETTINGS$seed + 500000L + study2_grid$condition_id * 1013L
 
