@@ -35,10 +35,13 @@ results/simulation/
 
 ## Reproducibility
 
-Each condition uses a fixed random-number seed. The code therefore reproduces the same Monte Carlo results whenever it is run with the same R implementation and settings.
+The simulation scripts reproduce the Monte Carlo results reported in the
+manuscript.
 
-The numerical calibration reproduces the population targets described in the manuscript. In Study 1, `delta_T` is calibrated separately for each focal-group latent-trait distribution and target value of `tau`. In Study 2, `c(alpha)` is calibrated so that `E(Y_T - Y_A | G = 0) = alpha`.
+In Study 1, `delta_T` is calibrated separately for each focal-group
+latent-trait distribution and target value of `tau`. In Study 2,
+`c(alpha)` is calibrated so that `E(Y_T - Y_A | G = 0) = alpha`.
 
-## Note on the manuscript tables
-
-The present scripts use explicit fixed seeds for reproducibility. If the originally reported simulations were generated under a different or undocumented seed, Monte Carlo summaries may differ slightly from the values currently printed in the manuscript while converging to the same population targets and operating characteristics.
+After running Studies 1 and 2, run
+`03_summarize_simulation_results.R` to reproduce the manuscript tables
+and verify the reported results.
