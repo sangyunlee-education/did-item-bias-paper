@@ -1,208 +1,150 @@
 # 01_study1_exact_equivalence.R
 # Study 1: Finite-Sample Inference Under Exact Identification
 #
-# Run this script from the repository root.
-# It sources R/simulation/00_helpers.R and writes results to
-# results/simulation/.
-#
-# Full paper run: N_REP <- 5000L
-# For a quick code check, temporarily use N_REP <- 50L or 100L.
+# This script preserves the condition ordering and condition-specific seeds
+# used to generate the manuscript results.
+# Run from the repository root.
 
 source(file.path("R", "simulation", "00_helpers.R"))
 
-N_REP <- 5000L
-CHUNK_SIZE <- 100L
-MASTER_SEED <- 20260806L
+cat("Preparing Study 1 conditions...\n")
 
-sample_sizes <- c(500L, 1000L, 2000L)
-distributions <- c("Normal", "Skewed", "Bimodal")
-tau_values <- c(0, -0.05, -0.10)
-rho_values <- c(0, 0.3, 0.6)
+# -----------------------------------------------------------------------------
+# Calibrate delta_T exactly as in the original simulation script
+# -----------------------------------------------------------------------------
 
-make_results_dir()
-
-
-# -------------------------------------------------------------------------
-# Calibrate delta_T
-# -------------------------------------------------------------------------
-
-calibration <- expand.grid(
-  Distribution = distributions,
-  tau = tau_values,
+study1_delta_table <- expand.grid(
+  distribution = DIST_LEVELS,
+  tau = TAU_LEVELS,
+  KEEP.OUT.ATTRS = FALSE,
   stringsAsFactors = FALSE
 )
 
-calibration$delta_T <- mapply(
-  FUN = calibrate_delta_study1,
-  tau = calibration$tau,
-  distribution = calibration$Distribution
+study1_delta_table$delta_t <- mapply(
+  FUN = find_delta_t,
+  target_tau = study1_delta_table$tau,
+  distribution = study1_delta_table$distribution
+)
+
+study1_delta_table$tau_check <- mapply(
+  FUN = function(distribution, delta_t) {
+    integrate_safe(function(theta) {
+      (p_test_focal(theta, delta_t) - p_test_reference(theta)) *
+        f1_density_study1(theta, distribution)
+    })
+  },
+  distribution = study1_delta_table$distribution,
+  delta_t = study1_delta_table$delta_t
+)
+
+if (max(abs(study1_delta_table$tau_check - study1_delta_table$tau)) > 1e-8) {
+  stop("The Study 1 delta_t calibration did not recover the target tau values.")
+}
+
+# A compact calibration file matching the manuscript notation.
+study1_calibration_out <- data.frame(
+  Distribution = study1_delta_table$distribution,
+  tau = study1_delta_table$tau,
+  delta_T = study1_delta_table$delta_t,
+  stringsAsFactors = FALSE
 )
 
 write.csv(
-  calibration,
-  file = file.path(
-    "results", "simulation", "study1_calibrated_delta_T.csv"
-  ),
+  study1_calibration_out,
+  file.path(SETTINGS$output_dir, "study1_calibrated_delta_T.csv"),
   row.names = FALSE
 )
 
-cat("\nStudy 1 calibrated delta_T values:\n")
-print(calibration, row.names = FALSE)
+# -----------------------------------------------------------------------------
+# Build the 81 conditions in the ORIGINAL order
+# -----------------------------------------------------------------------------
 
-
-# -------------------------------------------------------------------------
-# One Study 1 condition
-# -------------------------------------------------------------------------
-
-run_study1_condition <- function(N, distribution, tau, rho,
-                                 delta_T, n_rep, chunk_size, seed) {
-  stopifnot(N %% 2 == 0)
-
-  set.seed(seed)
-
-  n_group <- N / 2
-  beta_hat_all <- numeric(n_rep)
-  se_beta_all <- numeric(n_rep)
-
-  start_indices <- seq.int(1L, n_rep, by = chunk_size)
-
-  for (start in start_indices) {
-    end <- min(start + chunk_size - 1L, n_rep)
-    b <- end - start + 1L
-
-    # Reference group: Theta ~ N(0, 1)
-    theta0 <- matrix(
-      rnorm(n_group * b, mean = 0, sd = 1),
-      nrow = n_group,
-      ncol = b
-    )
-
-    # Focal group: distribution specified by the condition
-    theta1 <- matrix(
-      rtheta_focal(n_group * b, distribution = distribution),
-      nrow = n_group,
-      ncol = b
-    )
-
-    # Exact item response function equivalence in the reference condition:
-    # P_A(theta) = P_T(0, theta) = logistic(theta)
-    p_a0 <- inv_logit(theta0)
-    p_t0 <- inv_logit(theta0)
-
-    p_a1 <- inv_logit(theta1)
-    p_t1 <- inv_logit(theta1 + delta_T)
-
-    # Gaussian-copula construction for residual dependence.
-    u_a0 <- matrix(rnorm(n_group * b), nrow = n_group, ncol = b)
-    eps0 <- matrix(rnorm(n_group * b), nrow = n_group, ncol = b)
-    u_t0 <- rho * u_a0 + sqrt(1 - rho^2) * eps0
-
-    u_a1 <- matrix(rnorm(n_group * b), nrow = n_group, ncol = b)
-    eps1 <- matrix(rnorm(n_group * b), nrow = n_group, ncol = b)
-    u_t1 <- rho * u_a1 + sqrt(1 - rho^2) * eps1
-
-    y_a0 <- (pnorm(u_a0) <= p_a0)
-    y_t0 <- (pnorm(u_t0) <= p_t0)
-
-    y_a1 <- (pnorm(u_a1) <= p_a1)
-    y_t1 <- (pnorm(u_t1) <= p_t1)
-
-    d0 <- y_t0 - y_a0
-    d1 <- y_t1 - y_a1
-
-    fit <- hc3_two_group(d0, d1)
-
-    beta_hat_all[start:end] <- fit$beta_hat
-    se_beta_all[start:end] <- fit$se_beta
-  }
-
-  out <- summarize_mc(
-    estimates = beta_hat_all,
-    ses = se_beta_all,
-    target = tau,
-    null_value = 0,
-    df = N - 2
-  )
-
-  out$N <- N
-  out$Distribution <- distribution
-  out$tau <- tau
-  out$rho <- rho
-  out$delta_T <- delta_T
-
-  out[, c(
-    "N", "Distribution", "tau", "rho", "delta_T",
-    "Bias", "SE_SD", "Coverage", "Rejection"
-  )]
-}
-
-
-# -------------------------------------------------------------------------
-# Run all 81 conditions
-# -------------------------------------------------------------------------
-
-conditions <- expand.grid(
-  N = sample_sizes,
-  Distribution = distributions,
-  tau = tau_values,
-  rho = rho_values,
+study1_grid <- expand.grid(
+  N = N_LEVELS,
+  rho = RHO_LEVELS,
+  distribution = DIST_LEVELS,
+  tau = TAU_LEVELS,
+  KEEP.OUT.ATTRS = FALSE,
   stringsAsFactors = FALSE
 )
 
-conditions$delta_T <- mapply(
-  FUN = function(distribution, tau) {
-    calibration$delta_T[
-      calibration$Distribution == distribution &
-        calibration$tau == tau
-    ]
-  },
-  distribution = conditions$Distribution,
-  tau = conditions$tau
+study1_grid <- merge(
+  study1_grid,
+  study1_delta_table[, c("distribution", "tau", "delta_t")],
+  by = c("distribution", "tau"),
+  sort = FALSE
 )
 
-results <- vector("list", nrow(conditions))
+study1_grid <- study1_grid[order(
+  study1_grid$N,
+  study1_grid$rho,
+  match(study1_grid$distribution, DIST_LEVELS),
+  match(study1_grid$tau, TAU_LEVELS)
+), ]
 
-cat("\nRunning Study 1:", nrow(conditions), "conditions x",
-    N_REP, "replications\n\n")
+row.names(study1_grid) <- NULL
+study1_grid$condition_id <- seq_len(nrow(study1_grid))
 
-for (i in seq_len(nrow(conditions))) {
-  cond <- conditions[i, ]
+# DO NOT CHANGE: this is the original manuscript condition-seed rule.
+study1_grid$condition_seed <-
+  SETTINGS$seed + study1_grid$condition_id * 1013L
 
-  cat(
-    sprintf(
-      "[Study 1 %02d/%02d] N=%d, Distribution=%s, tau=%.3f, rho=%.1f\n",
-      i, nrow(conditions), cond$N, cond$Distribution, cond$tau, cond$rho
-    )
-  )
-
-  results[[i]] <- run_study1_condition(
-    N = cond$N,
-    distribution = cond$Distribution,
-    tau = cond$tau,
-    rho = cond$rho,
-    delta_T = cond$delta_T,
-    n_rep = N_REP,
-    chunk_size = CHUNK_SIZE,
-    seed = MASTER_SEED + i
-  )
+if (nrow(study1_grid) != 81L) {
+  stop("Study 1 should contain exactly 81 conditions; found ", nrow(study1_grid), ".")
 }
 
-study1_results <- do.call(rbind, results)
+# -----------------------------------------------------------------------------
+# Run Study 1
+# -----------------------------------------------------------------------------
+
+cat(
+  "Running Study 1:", nrow(study1_grid), "conditions x",
+  SETTINGS$n_rep, "replications.\n"
+)
+
+study1_results <- do.call(
+  rbind,
+  parallel_lapply_conditions(
+    split(study1_grid, seq_len(nrow(study1_grid))),
+    simulate_study1_condition
+  )
+)
+
+row.names(study1_results) <- NULL
+study1_results <- study1_results[order(
+  study1_results$N,
+  study1_results$rho,
+  match(study1_results$distribution, DIST_LEVELS),
+  match(study1_results$tau, TAU_LEVELS)
+), ]
 
 write.csv(
   study1_results,
-  file = file.path(
-    "results", "simulation", "study1_condition_results.csv"
-  ),
+  file.path(SETTINGS$output_dir, "study1_condition_results.csv"),
   row.names = FALSE
 )
 
-writeLines(
-  capture.output(sessionInfo()),
-  con = file.path(
-    "results", "simulation", "sessionInfo_study1.txt"
-  )
+# Appendix-ready complete results.
+study1_appendix_full <- study1_results[, c(
+  "N", "rho", "distribution", "tau", "delta_t", "replications",
+  "mc_mean_did", "mc_bias", "rmse", "mean_se", "empirical_sd",
+  "se_sd", "coverage", "reject_beta", "mean_alpha",
+  "mean_se_alpha", "empirical_sd_alpha", "reject_alpha", "coverage_alpha"
+)]
+
+names(study1_appendix_full)[names(study1_appendix_full) == "reject_beta"] <-
+  "rejection_rate_beta"
+
+write.csv(
+  study1_appendix_full,
+  file.path(SETTINGS$output_dir, "study1_appendix_full.csv"),
+  row.names = FALSE
+)
+
+capture.output(
+  sessionInfo(),
+  file = file.path(SETTINGS$output_dir, "sessionInfo_study1.txt")
 )
 
 cat("\nStudy 1 complete.\n")
-cat("Saved: results/simulation/study1_condition_results.csv\n")
+cat("Saved to: ", SETTINGS$output_dir, "\n", sep = "")
