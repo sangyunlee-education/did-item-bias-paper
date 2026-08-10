@@ -2,33 +2,31 @@
 # Conventional DIF screening for the empirical illustration
 # "Identifying Item Bias Without Conditioning: A Difference-in-Differences Approach"
 #
-# Methods:
-#   1. Mantel-Haenszel
-#   2. Logistic-regression DIF
-#   3. SIBTEST
-#   4. 2PL IRT likelihood-ratio test
+# Run this script from the repository root after:
+#   R/empirical/00_prepare_empirical_data.R
 #
-# Each item is treated as the studied item in turn. The remaining seven
-# items provide the basis for matching/linking.
-#
-# Run this script from the repository root after
-# R/empirical/00_prepare_empirical_data.R.
+# This script preserves the analysis used for the manuscript:
+#   1. Mantel-Haenszel using the sum of the other seven items
+#   2. Logistic-regression DIF using the sum of the other seven items
+#   3. SIBTEST using the other seven items as the matching set
+#   4. 2PL IRT likelihood-ratio test using the other seven items as linking items
 
-required_packages <- c("difR", "mirt")
+required_packages <- c(
+  "dplyr", "purrr", "tibble", "mirt", "difR"
+)
 
 missing_packages <- required_packages[
   !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
 ]
 
-if (length(missing_packages) > 0) {
+if (length(missing_packages) > 0L) {
   stop(
     "Install the following packages before running this script: ",
-    paste(missing_packages, collapse = ", "),
-    "\nFor example: install.packages(c(",
-    paste(sprintf('"%s"', missing_packages), collapse = ", "),
-    "))"
+    paste(missing_packages, collapse = ", ")
   )
 }
+
+library(mirt)
 
 DATA_FILE <- file.path(
   "data", "derived", "piaac_korea_locator_analysis.csv"
@@ -41,7 +39,7 @@ if (!file.exists(DATA_FILE)) {
   )
 }
 
-dat <- read.csv(
+dat <- utils::read.csv(
   DATA_FILE,
   check.names = FALSE,
   stringsAsFactors = FALSE
@@ -58,176 +56,341 @@ ITEM_NAMES <- c(
   "C833P002S"
 )
 
-item_data <- dat[, ITEM_NAMES, drop = FALSE]
-G <- as.integer(dat$G)
+ALPHA_LEVEL <- 0.05
 
-if (!all(G %in% c(0L, 1L))) {
+if (!all(dat$G %in% c(0L, 1L))) {
   stop("G must be coded 0 = reference and 1 = focal.")
 }
 
-ALPHA_LEVEL <- 0.05
+
+# ------------------------------------------------------------------------------
+# Helper functions
+# ------------------------------------------------------------------------------
+
+flag_from_p <- function(p, alpha_level = ALPHA_LEVEL) {
+  ifelse(is.na(p), NA, p < alpha_level)
+}
+
+extract_mirt_anova_p <- function(anova_table, row = 2L) {
+  if (is.null(anova_table) || nrow(anova_table) < row) {
+    return(NA_real_)
+  }
+
+  preferred_names <- c("p", "Pr(>Chisq)", "Pr(>Chi)", "Pr(>X2)")
+  available_name <- preferred_names[preferred_names %in% names(anova_table)]
+
+  if (length(available_name) > 0L) {
+    return(as.numeric(anova_table[[available_name[1L]]][row]))
+  }
+
+  p_columns <- grep("^p$|^Pr", names(anova_table), ignore.case = TRUE)
+
+  if (length(p_columns) == 0L) {
+    return(NA_real_)
+  }
+
+  as.numeric(anova_table[[p_columns[1L]]][row])
+}
 
 
-# -------------------------------------------------------------------------
-# 2PL IRT restricted model
-# -------------------------------------------------------------------------
-#
-# The restricted model constrains all eight items to be invariant across
-# groups while allowing the focal-group latent mean and variance to differ.
-# For each studied item, the comparison model frees that item's 2PL
-# parameters and keeps the remaining seven items invariant as linking items.
+# ------------------------------------------------------------------------------
+# 1. Mantel-Haenszel DIF
+# ------------------------------------------------------------------------------
 
-irt_group <- factor(
-  ifelse(G == 0L, "reference", "focal"),
-  levels = c("reference", "focal")
-)
+run_mh_screen <- function(data, items, group_var = "G") {
+  item_data <- data |>
+    dplyr::select(dplyr::all_of(items))
 
-irt_restricted <- mirt::multipleGroup(
-  data = item_data,
-  model = 1,
-  group = irt_group,
-  itemtype = "2PL",
-  invariance = c("free_means", "free_var", ITEM_NAMES),
-  SE = FALSE,
-  verbose = FALSE
-)
+  group <- data[[group_var]]
 
+  purrr::map_dfr(items, function(studied_item) {
+    matching_items <- setdiff(items, studied_item)
+    matching_score <- rowSums(item_data[, matching_items, drop = FALSE])
 
-# -------------------------------------------------------------------------
-# Screen each item
-# -------------------------------------------------------------------------
-
-results <- vector("list", length(ITEM_NAMES))
-
-for (j in seq_along(ITEM_NAMES)) {
-  studied_item <- ITEM_NAMES[j]
-  other_indices <- setdiff(seq_along(ITEM_NAMES), j)
-  other_items <- ITEM_NAMES[other_indices]
-
-  cat(
-    sprintf(
-      "[%d/%d] Screening %s\n",
-      j, length(ITEM_NAMES), studied_item
+    contingency_table <- table(
+      factor(item_data[[studied_item]], levels = c(0, 1)),
+      factor(group, levels = c(0, 1)),
+      factor(matching_score, levels = sort(unique(matching_score)))
     )
+
+    # IMPORTANT: correct = FALSE reproduces the manuscript analysis.
+    fit <- tryCatch(
+      stats::mantelhaen.test(
+        contingency_table,
+        correct = FALSE
+      ),
+      error = function(e) {
+        warning(
+          "Mantel-Haenszel analysis failed for ",
+          studied_item, ": ", conditionMessage(e)
+        )
+        NULL
+      }
+    )
+
+    p_value <- if (is.null(fit)) {
+      NA_real_
+    } else {
+      as.numeric(fit$p.value)
+    }
+
+    tibble::tibble(
+      Item = studied_item,
+      Mantel_Haenszel = p_value
+    )
+  })
+}
+
+
+# ------------------------------------------------------------------------------
+# 2. Logistic-regression DIF
+# ------------------------------------------------------------------------------
+
+run_logistic_screen <- function(data, items, group_var = "G") {
+  item_data <- data |>
+    dplyr::select(dplyr::all_of(items))
+
+  group <- data[[group_var]]
+
+  purrr::map_dfr(items, function(studied_item) {
+    matching_items <- setdiff(items, studied_item)
+    matching_score <- rowSums(item_data[, matching_items, drop = FALSE])
+
+    model_data <- tibble::tibble(
+      Y = item_data[[studied_item]],
+      G = group,
+      matching_score_z = as.numeric(scale(matching_score))
+    )
+
+    reduced_model <- tryCatch(
+      stats::glm(
+        Y ~ matching_score_z,
+        family = stats::binomial(),
+        data = model_data
+      ),
+      error = function(e) NULL
+    )
+
+    full_model <- tryCatch(
+      stats::glm(
+        Y ~ matching_score_z * G,
+        family = stats::binomial(),
+        data = model_data
+      ),
+      error = function(e) NULL
+    )
+
+    if (is.null(reduced_model) || is.null(full_model)) {
+      warning("Logistic DIF analysis failed for ", studied_item)
+
+      return(
+        tibble::tibble(
+          Item = studied_item,
+          Logistic_DIF = NA_real_
+        )
+      )
+    }
+
+    comparison <- tryCatch(
+      stats::anova(
+        reduced_model,
+        full_model,
+        test = "LRT"
+      ),
+      error = function(e) NULL
+    )
+
+    p_value <- if (is.null(comparison)) {
+      NA_real_
+    } else {
+      as.numeric(comparison$`Pr(>Chi)`[2L])
+    }
+
+    tibble::tibble(
+      Item = studied_item,
+      Logistic_DIF = p_value
+    )
+  })
+}
+
+
+# ------------------------------------------------------------------------------
+# 3. SIBTEST
+# ------------------------------------------------------------------------------
+
+run_sibtest_screen <- function(data, items, group_var = "G") {
+  item_matrix <- as.matrix(
+    data |>
+      dplyr::select(dplyr::all_of(items))
   )
 
-  # -----------------------------------------------------------------------
-  # 1. Mantel-Haenszel
-  # -----------------------------------------------------------------------
-  # Matching score = sum of the remaining seven items.
+  group <- data[[group_var]]
 
-  rest_score <- rowSums(item_data[, other_items, drop = FALSE])
-
-  mh_fit <- difR::difMH(
-    Data = item_data,
-    group = G,
-    focal.name = 1,
-    match = rest_score,
-    MHstat = "MHChisq",
-    correct = TRUE,
-    exact = FALSE,
-    alpha = ALPHA_LEVEL,
-    purify = FALSE,
-    p.adjust.method = NULL
+  # This reproduces the original analysis: each studied item is evaluated
+  # using the remaining items as the matching set.
+  fit <- tryCatch(
+    difR::sibTest(
+      data = item_matrix,
+      member = group,
+      anchor = seq_along(items),
+      type = "udif"
+    ),
+    error = function(e) {
+      warning("SIBTEST failed: ", conditionMessage(e))
+      NULL
+    }
   )
 
-  p_mh <- as.numeric(mh_fit$p.value[j])
+  if (is.null(fit)) {
+    return(
+      tibble::tibble(
+        Item = items,
+        SIBTEST = NA_real_
+      )
+    )
+  }
 
-  # -----------------------------------------------------------------------
-  # 2. Logistic-regression DIF
-  # -----------------------------------------------------------------------
-  # Standardizing the rest score does not change the likelihood-ratio test.
-  # Reduced model: item ~ matching score
-  # Full model:    item ~ matching score * group
-  # The LRT jointly tests the group main effect and group-by-score
-  # interaction (2 df).
+  p_values <- as.numeric(fit$p.value)
 
-  y <- item_data[[studied_item]]
-  rest_score_z <- as.numeric(scale(rest_score))
+  if (length(p_values) != length(items)) {
+    stop(
+      "SIBTEST returned ", length(p_values),
+      " p-values for ", length(items), " items."
+    )
+  }
 
-  logistic_reduced <- glm(
-    y ~ rest_score_z,
-    family = binomial(link = "logit")
-  )
-
-  logistic_full <- glm(
-    y ~ rest_score_z * G,
-    family = binomial(link = "logit")
-  )
-
-  logistic_lrt <- anova(
-    logistic_reduced,
-    logistic_full,
-    test = "LRT"
-  )
-
-  p_logistic <- as.numeric(
-    logistic_lrt$`Pr(>Chi)`[nrow(logistic_lrt)]
-  )
-
-  # -----------------------------------------------------------------------
-  # 3. SIBTEST
-  # -----------------------------------------------------------------------
-  # The remaining seven items are the matching set.
-
-  sib_fit <- difR::sibTest(
-    data = as.matrix(item_data),
-    member = G,
-    anchor = other_indices,
-    type = "udif"
-  )
-
-  p_sibtest <- as.numeric(sib_fit$p.value[j])
-
-  # -----------------------------------------------------------------------
-  # 4. 2PL IRT likelihood-ratio test
-  # -----------------------------------------------------------------------
-  # The remaining seven items are invariant linking items. The studied
-  # item's slope and intercept are free across groups.
-
-  irt_free_studied <- mirt::multipleGroup(
-    data = item_data,
-    model = 1,
-    group = irt_group,
-    itemtype = "2PL",
-    invariance = c("free_means", "free_var", other_items),
-    SE = FALSE,
-    verbose = FALSE
-  )
-
-  irt_lrt <- anova(
-    irt_restricted,
-    irt_free_studied
-  )
-
-  p_irt_lrt <- as.numeric(
-    irt_lrt[nrow(irt_lrt), "p"]
-  )
-
-  results[[j]] <- data.frame(
-    Item = studied_item,
-    Mantel_Haenszel = p_mh,
-    Logistic_DIF = p_logistic,
-    SIBTEST = p_sibtest,
-    IRT_2PL_LRT = p_irt_lrt,
-    stringsAsFactors = FALSE
+  tibble::tibble(
+    Item = items,
+    SIBTEST = p_values
   )
 }
 
-screening <- do.call(rbind, results)
 
-screening$Candidate_anchor <- apply(
-  screening[
-    c(
-      "Mantel_Haenszel",
-      "Logistic_DIF",
-      "SIBTEST",
-      "IRT_2PL_LRT"
+# ------------------------------------------------------------------------------
+# 4. 2PL IRT likelihood-ratio DIF
+# ------------------------------------------------------------------------------
+
+run_irt_lrt_screen <- function(data, items, group_var = "G") {
+  item_data <- data |>
+    dplyr::select(dplyr::all_of(items))
+
+  group <- factor(
+    data[[group_var]],
+    levels = c(0, 1),
+    labels = c("reference", "focal")
+  )
+
+  # Fully invariant restricted model with group mean and variance free.
+  restricted_model <- tryCatch(
+    mirt::multipleGroup(
+      data = item_data,
+      model = 1,
+      group = group,
+      itemtype = "2PL",
+      invariance = c(
+        items,
+        "free_means",
+        "free_var"
+      ),
+      verbose = FALSE
+    ),
+    error = function(e) {
+      stop(
+        "The fully invariant 2PL model failed: ",
+        conditionMessage(e)
+      )
+    }
+  )
+
+  purrr::map_dfr(items, function(studied_item) {
+    linking_items <- setdiff(items, studied_item)
+
+    # The studied item's 2PL parameters are free across groups;
+    # the other seven items remain invariant linking items.
+    less_restricted_model <- tryCatch(
+      mirt::multipleGroup(
+        data = item_data,
+        model = 1,
+        group = group,
+        itemtype = "2PL",
+        invariance = c(
+          linking_items,
+          "free_means",
+          "free_var"
+        ),
+        verbose = FALSE
+      ),
+      error = function(e) {
+        warning(
+          "The less restricted 2PL model failed for ",
+          studied_item, ": ", conditionMessage(e)
+        )
+        NULL
+      }
     )
-  ],
-  1,
-  function(p) all(p >= ALPHA_LEVEL)
-)
+
+    comparison <- if (is.null(less_restricted_model)) {
+      NULL
+    } else {
+      tryCatch(
+        anova(
+          restricted_model,
+          less_restricted_model
+        ),
+        error = function(e) {
+          warning(
+            "The 2PL likelihood-ratio comparison failed for ",
+            studied_item, ": ", conditionMessage(e)
+          )
+          NULL
+        }
+      )
+    }
+
+    p_value <- extract_mirt_anova_p(comparison)
+
+    tibble::tibble(
+      Item = studied_item,
+      IRT_2PL_LRT = p_value
+    )
+  })
+}
+
+
+# ------------------------------------------------------------------------------
+# Run the four DIF screens
+# ------------------------------------------------------------------------------
+
+cat("\nRunning Mantel-Haenszel DIF screening...\n")
+mh_results <- run_mh_screen(dat, ITEM_NAMES)
+
+cat("Running logistic-regression DIF screening...\n")
+logistic_results <- run_logistic_screen(dat, ITEM_NAMES)
+
+cat("Running SIBTEST screening...\n")
+sibtest_results <- run_sibtest_screen(dat, ITEM_NAMES)
+
+cat("Running 2PL IRT likelihood-ratio DIF screening...\n")
+irt_results <- run_irt_lrt_screen(dat, ITEM_NAMES)
+
+screening <- mh_results |>
+  dplyr::full_join(logistic_results, by = "Item") |>
+  dplyr::full_join(sibtest_results, by = "Item") |>
+  dplyr::full_join(irt_results, by = "Item") |>
+  dplyr::mutate(
+    all_p_values_available =
+      !is.na(Mantel_Haenszel) &
+      !is.na(Logistic_DIF) &
+      !is.na(SIBTEST) &
+      !is.na(IRT_2PL_LRT),
+    Candidate_anchor =
+      all_p_values_available &
+      Mantel_Haenszel >= ALPHA_LEVEL &
+      Logistic_DIF >= ALPHA_LEVEL &
+      SIBTEST >= ALPHA_LEVEL &
+      IRT_2PL_LRT >= ALPHA_LEVEL
+  ) |>
+  dplyr::arrange(match(Item, ITEM_NAMES))
 
 dir.create(
   file.path("results", "empirical"),
@@ -235,7 +398,7 @@ dir.create(
   showWarnings = FALSE
 )
 
-write.csv(
+utils::write.csv(
   screening,
   file.path(
     "results", "empirical", "conventional_dif_screening.csv"
@@ -244,7 +407,7 @@ write.csv(
 )
 
 writeLines(
-  capture.output(sessionInfo()),
+  capture.output(utils::sessionInfo()),
   con = file.path(
     "results", "empirical", "sessionInfo_screening.txt"
   )
