@@ -4,12 +4,6 @@
 #
 # Run this script from the repository root after:
 #   R/empirical/00_prepare_empirical_data.R
-#
-# This script preserves the analysis used for the manuscript:
-#   1. Mantel-Haenszel using the sum of the other seven items
-#   2. Logistic-regression DIF using the sum of the other seven items
-#   3. SIBTEST using the other seven items as the matching set
-#   4. 2PL IRT likelihood-ratio test using the other seven items as linking items
 
 required_packages <- c(
   "dplyr", "purrr", "tibble", "mirt", "difR"
