@@ -4,8 +4,6 @@
 # Run this script after:
 #   R/simulation/01_study1_exact_equivalence.R
 #   R/simulation/02_study2_falsification_diagnostic.R
-#
-# No random numbers are generated in this script.
 
 source(file.path("R", "simulation", "00_helpers.R"))
 
