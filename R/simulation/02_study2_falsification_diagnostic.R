@@ -12,7 +12,7 @@ source(file.path("R", "simulation", "00_helpers.R"))
 
 N_REP <- 5000L
 CHUNK_SIZE <- 100L
-MASTER_SEED <- 20260810L + 100000L
+MASTER_SEED <- 20260806L + 100000L
 
 sample_sizes <- c(500L, 1000L, 2000L)
 alpha_values <- c(
