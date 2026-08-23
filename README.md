@@ -2,134 +2,112 @@
 
 ## Reproducibility Materials
 
-This repository contains the R code used to reproduce the Monte Carlo simulations and empirical illustration reported in the manuscript **“Identifying Item Bias Without Conditioning: A Difference-in-Differences Approach.”**
+This repository contains the R code used for the simulation studies and empirical illustration reported in the manuscript *Identifying Item Bias Without Conditioning: A Difference-in-Differences Approach*.
 
-The repository is anonymized for double-blind peer review. Author-identifying information is intentionally omitted and will be added after the review process, if appropriate.
+The repository is prepared for double-blind peer review and contains no author-identifying information.
 
-## Repository Contents
+## Files
 
 ### `simulation.R`
 
-Reproduces the two Monte Carlo simulation studies.
+Reproduces Simulation Studies 1 and 2.
 
-**Simulation Study 1** evaluates the proposed difference-in-differences (DID) estimator when the matching variable used by conventional DIF analysis is invalid or unreliable. The simulation varies:
+**Simulation Study 1** evaluates the proposed difference-in-differences (DID) approach when the matching variable used in conventional DIF analysis is invalid or unreliable.
 
-- sample size: \(N = 500, 1000, 2000\);
-- average item-bias effect: \(\tau = 0, -.05, -.10\);
-- matching-variable invalidity: \(\delta = 0, .25, .50\); and
-- matching-variable reliability: \(\rho_M = 1.00, .80, .60\).
+The simulation varies:
 
-The conditioning-based comparator is uniform logistic-regression DIF. DID inference uses HC3 heteroskedasticity-robust standard errors.
+- Sample size: `N = 500, 1000, 2000`
+- Item-bias effect: `tau = 0, -.05, -.10`
+- Matching-variable invalidity: `delta = 0, .25, .50`
+- Matching-variable reliability: `rho_M = 1.00, .80, .60`
 
-**Simulation Study 2** evaluates robustness of DID to violations of item response function (IRF) equivalence. Difficulty and discrimination departures are calibrated to the same maximum reference-group IRF discrepancy,
+The comparison method is uniform logistic-regression DIF. DID inference uses HC3 heteroskedasticity-robust standard errors. Each condition uses 5,000 Monte Carlo replications.
 
-\[
-\epsilon
-=
-\sup_{\theta}
-\left|
-P_T(0,\theta)-P_A(\theta)
-\right|,
-\]
+**Simulation Study 2** evaluates DID under violations of item response function (IRF) equivalence. Difficulty and discrimination departures are calibrated to the same maximum IRF discrepancy:
 
-with \(\epsilon = 0, .05, .10\). The simulation separately evaluates sampling performance for the population DID and coverage of the target item-bias estimand \(\tau\).
+```text
+epsilon = sup_theta |P_T(0, theta) - P_A(theta)|
+```
 
-The script writes condition-specific summaries and source data for the simulation tables and figures to the `results/` directory.
+with `epsilon = 0, .05, .10`.
+
+The script saves simulation summaries and source data for the reported tables and figures in the `results/` directory.
 
 ### `empirical_illustration.R`
 
-Reproduces the empirical illustration using the Korean sample from the **2023 Programme for the International Assessment of Adult Competencies (PIAAC)**.
+Reproduces the empirical illustration using the Korean sample from the 2023 Programme for the International Assessment of Adult Competencies (PIAAC).
 
-The analysis:
+The analysis uses:
 
-- treats adults aged 25–34 as the reference group and adults aged 45–54 as the focal group;
-- examines Literacy item `E320004S` as the test item;
-- uses `E320003S` as the anchor item;
-- uses the ten PIAAC Literacy plausible values (`PVLIT1`–`PVLIT10`) as the matching variable for conventional uniform logistic-regression DIF;
-- estimates the proposed DID on the response-probability scale using HC3 heteroskedasticity-robust standard errors; and
-- conducts the distribution-free and equal-variance normal sensitivity analyses reported in the manuscript.
+- Reference group: adults aged 25–34
+- Focal group: adults aged 45–54
+- Test item: `E320004S`
+- Anchor item: `E320003S`
+- Matching variable for logistic DIF: `PVLIT1`–`PVLIT10`
+- Analytic sample: `N = 536` (285 reference; 251 focal)
 
-The analytic sample contains 536 respondents with observed responses to both items (285 reference-group and 251 focal-group respondents).
+The script estimates conventional uniform logistic-regression DIF, the proposed DID with HC3 heteroskedasticity-robust standard errors, and the sensitivity analyses reported in the manuscript.
 
 ## Data
 
-The PIAAC public-use microdata are **not redistributed in this repository**.
+The PIAAC public-use data are not included in this repository.
 
-The empirical illustration requires the Korean 2023 PIAAC public-use data file, available from the OECD PIAAC data repository:
+The Korean 2023 PIAAC public-use data can be obtained from the OECD PIAAC data repository:
 
 https://www.oecd.org/en/about/programmes/piaac/piaac-data.html
 
-After obtaining the Korean public-use CSV file, place it in the working directory and set the following line in `empirical_illustration.R` to the appropriate local file name or path:
+After downloading the Korean CSV file, place it in the working directory and specify its path in `empirical_illustration.R`:
 
 ```r
 DATA_FILE <- "prgkorp2.csv"
 ```
 
-The OECD CSV is semicolon-delimited. The script imports the file using the delimiter and missing-value codes required for the public-use file.
+## Requirements
 
-## Software Requirements
-
-The analyses were implemented in **R**. The scripts require the following packages:
+The analyses require R and the following packages:
 
 ```r
-install.packages(c(
-  "dplyr",
-  "sandwich"
-))
+install.packages(c("dplyr", "sandwich"))
 ```
 
-The scripts print `sessionInfo()` at completion to facilitate reproducibility.
+## Running the Code
 
-## Running the Analyses
-
-Clone or download this repository and set the repository root as the R working directory.
-
-To reproduce the Monte Carlo simulations:
+Run the simulation studies with:
 
 ```r
 source("simulation.R")
 ```
 
-To reproduce the empirical illustration after obtaining the PIAAC data:
+Run the empirical illustration with:
 
 ```r
 source("empirical_illustration.R")
 ```
 
-The simulation script uses 5,000 Monte Carlo replications per condition, as reported in the manuscript. Consequently, the full simulation may require substantial computation time.
-
-Both scripts create a `results/` directory automatically and save the principal reproducibility outputs as CSV files.
+Both scripts create a `results/` directory for the main output files.
 
 ## Expected Empirical Results
 
-With the Korean 2023 PIAAC public-use data used in the manuscript, `empirical_illustration.R` should reproduce the following rounded results:
+Running `empirical_illustration.R` with the Korean 2023 PIAAC public-use data should reproduce the following rounded results:
 
 | Method | Estimate | SE | 95% CI | p |
-|---|---:|---:|---:|---:|
-| Logistic DIF | −.638 | .229 | [−1.086, −.190] | .005 |
-| DID | −.119 | .042 | [−.201, −.036] | .005 |
+| --- | ---: | ---: | ---: | ---: |
+| Logistic DIF | -.638 | .229 | [-1.086, -.190] | .005 |
+| DID | -.119 | .042 | [-.201, -.036] | .005 |
 
-The logistic DIF estimate is on the log-odds scale, whereas the DID estimate is on the response-probability scale.
+The logistic DIF estimate is on the log-odds scale. The DID estimate is on the response-probability scale.
 
-For the sensitivity analysis, the manuscript uses \(\epsilon=.033\). The distribution-free sensitivity-adjusted 95% interval is approximately \([-.267,.030]\). Under the equal-variance normal specification, using the observed standardized Literacy difference of approximately \(|\mu|=.72\), the adjusted interval is approximately \([-.220,-.018]\).
+The sensitivity analysis uses `epsilon = .033`. The sensitivity-adjusted 95% intervals are:
 
-Small differences in unrounded output may arise from software versions or numerical routines.
+- Distribution-free: `[-.267, .030]`
+- Equal-variance normal specification with `|mu| ≈ .72`: `[-.220, -.018]`
 
-## Reproducibility Notes
+## Reproducibility
 
-The code is organized to correspond as closely as possible to the analyses reported in the manuscript. The simulation and empirical illustration are kept in separate scripts so that the computationally intensive Monte Carlo analyses can be run independently of the PIAAC application.
+`simulation.R` uses a fixed random seed and 5,000 replications per condition. Exact Monte Carlo results may depend on the R version, package versions, and random-number generation environment.
 
-Random-number generation for the simulation is initialized with a fixed seed in `simulation.R`. Because the manuscript reports Monte Carlo results based on finite replications, exact reproduction of the reported simulation values requires the same code, seed, software environment, and random-number generation behavior.
+Both scripts print `sessionInfo()` at completion.
 
-The empirical illustration does not require access to any nonpublic or proprietary data beyond the publicly available OECD PIAAC public-use file.
+## Anonymous Review
 
-## Double-Blind Review
-
-This repository is prepared for double-blind peer review. It intentionally excludes author names, affiliations, personal contact information, and other direct author identifiers. Please do not cite or distribute the repository in a manner that could compromise anonymous review.
-
-## License and Citation
-
-Formal citation information and licensing details will be added following peer review. During the anonymous review period, please refer to the accompanying manuscript by title:
-
-> *Identifying Item Bias Without Conditioning: A Difference-in-Differences Approach*
-
+These materials are provided for double-blind peer review. Author names, affiliations, and contact information are intentionally omitted.
