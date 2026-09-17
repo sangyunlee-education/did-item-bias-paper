@@ -51,3 +51,7 @@ rsconnect/
 # PIAAC data
 data/
 prgkorp2.csv
+
+# Generated analysis outputs
+/results/
+
