@@ -1,1489 +1,884 @@
 # Identifying Item Bias Without Conditioning: A Difference-in-Differences Approach
-# Run from the repository folder. See README.md for inputs and output files.
-# Sections: settings; shared calculations; simulations; figures/tables; PIAAC; run.
+# One self-contained script; base R only (R >= 3.6).
+# Read in order: settings, calculations, Study 1, Study 2, illustration, outputs.
+# Run from the repository folder: Rscript reproduce_did_study.R simulations
 
 # 1. Settings -----------------------------------------------------------------
 
-RUN_MODE <- "simulations"  # simulations, outputs, empirical, all, checks, smoke
+RUN_MODE <- "simulations"  # simulations, study1, study2, outputs, empirical, all, smoke
 N_REP <- 5000L
-STUDY1_SEED <- 2026L
-STUDY2_SEED <- 2027L
+OUTPUT_DIR <- "results"
+PIAAC_FILE <- "prgkorp2.csv"
+MAKE_FIGURES <- TRUE
+FIGURE_FONT <- "Arial"     # Install this font to preserve the manuscript design.
+FINAL_FIGURE_WIDTH_MM <- 144  # Use the same inclusion width for Figures 4 and 5.
+
+# Optional paths to saved raw simulations. Blank means simulate in simulation
+# modes. In outputs mode, blank means results/study1 or study2/simulation.rds.
+# Earlier simulation_revised.rds files are also accepted through these paths.
+STUDY1_SAVED <- ""
+STUDY2_SAVED <- ""
+
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) == 1L) RUN_MODE <- args[1L]
+if (length(args) > 1L) stop("Supply at most one run mode.")
+stopifnot(RUN_MODE %in% c("simulations", "study1", "study2", "outputs",
+                        "empirical", "all", "smoke"))
+RUN_STUDY1 <- RUN_MODE %in% c("simulations", "study1", "outputs", "all", "smoke")
+RUN_STUDY2 <- RUN_MODE %in% c("simulations", "study2", "outputs", "all", "smoke")
+RUN_EMPIRICAL <- RUN_MODE %in% c("empirical", "all")
+if (RUN_MODE == "smoke") {
+  N_REP <- 20L
+  OUTPUT_DIR <- paste0(OUTPUT_DIR, "_smoke")
+  STUDY1_SAVED <- STUDY2_SAVED <- ""
+}
+if (RUN_MODE == "outputs") {
+  if (!nzchar(STUDY1_SAVED)) STUDY1_SAVED <- file.path(OUTPUT_DIR, "study1", "simulation.rds")
+  if (!nzchar(STUDY2_SAVED)) STUDY2_SAVED <- file.path(OUTPUT_DIR, "study2", "simulation.rds")
+}
 ALPHA <- .05
-OUTPUT_ROOT <- "results"
-EMPIRICAL_DATA_FILE <- "prgkorp2.csv"
+MU <- -.5
+N_VALUES <- c(500L, 1000L, 2000L)
+TAU_VALUES <- c(0, -.05, -.10)
+ETA_TRUE_VALUES <- c(0, .05, .10, .15)
+ETA_MULTIPLIERS <- c(0, .10, .25, .50, .75, 1, 1.25)
 EMPIRICAL_ETA <- .033
-FIGURE_FONT <- "Arial"
-
-# A terminal argument overrides RUN_MODE; Source in RStudio uses the setting above.
-if (sys.nframe() == 0L) {
-  args <- commandArgs(trailingOnly = TRUE)
-  if (length(args) > 1L) stop("Supply one run mode; see README.md.")
-  if (length(args) == 1L) RUN_MODE <- args[1L]
+Z <- qnorm(1 - ALPHA / 2)
+stopifnot(getRversion() >= "3.6.0", N_REP >= 2, N_REP == as.integer(N_REP))
+if (RUN_EMPIRICAL && !file.exists(PIAAC_FILE)) stop("PIAAC CSV not found: ", PIAAC_FILE)
+if (RUN_STUDY1 && nzchar(STUDY1_SAVED) && !file.exists(STUDY1_SAVED)) {
+  stop("Saved Study 1 results not found: ", STUDY1_SAVED)
 }
-if (getRversion() < "3.6.0") stop("R >= 3.6.0 is required.")
-
-# 2. Shared calculations --------------------------------------------------
-
-write_csv <- function(x, filename) {
-  write.csv(x, file = filename, row.names = FALSE, na = "")
-  invisible(filename)
+if (RUN_STUDY2 && nzchar(STUDY2_SAVED) && !file.exists(STUDY2_SAVED)) {
+  stop("Saved Study 2 results not found: ", STUDY2_SAVED)
 }
+dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+RNGkind("Mersenne-Twister", "Inversion", "Rejection")
 
-prepare_directory <- function(directory) {
-  if (!dir.exists(directory)) {
-    dir.create(directory, recursive = TRUE, showWarnings = FALSE)
-  }
-  if (!dir.exists(directory)) {
-    stop("Could not create directory: ", directory)
-  }
-  invisible(directory)
+# 2. Shared calculations and saved-data loading -------------------------------------------------
+
+# Integrate a function over N(mu, 1). Used for calibration and population checks.
+normal_mean <- function(fun, mu = MU) {
+  integrate(function(theta) fun(theta) * dnorm(theta, mu, 1),
+            -Inf, Inf, subdivisions = 1000L, rel.tol = 1e-10,
+            abs.tol = 1e-12)$value
 }
 
-set_condition_seed <- function(base_seed, condition_id) {
-  RNGkind(kind = "Mersenne-Twister", normal.kind = "Inversion", sample.kind = "Rejection")
-
-  seed <- as.double(base_seed) + 1009 * as.double(condition_id)
-
-  if (!is.finite(seed) || seed < 1 || 
-      seed > .Machine$integer.max) {
-    stop("Invalid condition-specific seed.")
-  }
-
-  set.seed(as.integer(seed))
-  invisible(seed)
-}
-
-save_run_information <- function(metadata, directory) {
-  writeLines(capture.output(dput(metadata)), file.path(directory, "metadata.txt"))
-
-  writeLines(capture.output(sessionInfo()), file.path(directory, "sessionInfo.txt"))
-
-  invisible(NULL)
-}
-
-make_metadata <- function(study, replications, base_seed, alpha) {
-  list(study = study, replications = as.integer(replications),
-    base_seed = as.integer(base_seed),
-    condition_seed_rule = "base_seed + 1009 * condition_id", alpha = alpha,
-    rng_kind = "Mersenne-Twister", normal_kind = "Inversion", sample_kind = "Rejection",
-    group_probability = .5, mu = -.5, latent_sd = 1, anchor_discrimination = 1.5,
-    anchor_difficulty = 0, responses_conditionally_independent = TRUE,
-    sensitivity_inputs_fixed = TRUE, confidence_intervals_clipped = FALSE,
-    R_version = R.version.string, timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"))
-}
-
-integrate_real <- function(fun) {
-  integrate(fun, lower = -Inf, upper = Inf, subdivisions = 1000L, rel.tol = 1e-10,
-    abs.tol = 1e-12, stop.on.error = TRUE)$value
-}
-
-anchor_irf <- function(theta) {
-  plogis(1.5 * theta)
-}
-
-comparison_anchor_irf <- function(theta, violation, parameter) {
-  if (identical(violation, "Smooth")) {
-    if (length(parameter) != 1L || !is.finite(parameter) || 
-        parameter < 0 || parameter >= .5) {
-      stop("Smooth nonequivalence requires 0 <= eta < .5.")
-    }
-    return(parameter + (1 - 2 * parameter) * anchor_irf(theta))
-  }
-  anchor_irf(theta)
-}
-
-reference_lp <- function(theta, violation, parameter) {
-  if (identical(violation, "Difficulty") && identical(parameter, 0)) {
-    return(1.5 * (theta - parameter))
-  }
-  if (identical(violation, "Smooth") && length(parameter) == 1L && 
-      is.finite(parameter) && parameter >= 0 && parameter < .5) {
-    return(1.5 * theta)
-  }
-  stop("Unsupported IRF specification for the manuscript simulations.")
-}
-
-reference_irf <- function(theta, violation, parameter) {
-  plogis(reference_lp(theta, violation, parameter))
-}
-
-calibrate_parameter <- function(eta, violation) {
-  if (!identical(violation, "Smooth") || length(eta) != 1L || 
-      !is.finite(eta) || eta < 0 || eta >= .5) {
-    stop("Study 2 requires the smooth anchor model with 0 <= eta < .5.")
-  }
-  eta
-}
-
-tau_from_gamma <- function(gamma, violation, parameter,
-    mu = -.5) {
-
-  integrate_real(function(theta) {
-    lp <- reference_lp(theta, violation, parameter)
-
-    (plogis(lp + gamma) - plogis(lp)) *
-      dnorm(theta, mean = mu, sd = 1)
-  })
-}
-
-calibrate_gamma <- function(tau, violation, parameter,
-    mu = -.5) {
-
-  if (length(tau) != 1L || !is.finite(tau)) {
-    stop("tau must be one finite number.")
-  }
-
-  if (tau == 0) {
-    return(0)
-  }
-
-  mean_reference <- integrate_real(function(theta) {
-    reference_irf(theta, violation, parameter) *
-      dnorm(theta, mean = mu, sd = 1)
-  })
-
-  if (tau <= -mean_reference || 
-      tau >= 1 - mean_reference) {
-    stop("Requested tau is outside the attainable open interval.")
-  }
-
-  objective <- function(gamma) {
-    tau_from_gamma(gamma, violation, parameter, mu) - tau
-  }
-
-  lower <- -1
-  upper <- 1
-
-  while (objective(lower) > 0) {
-    lower <- 2 * lower
-
-    if (abs(lower) > 1e6) {
-      stop("Could not bracket gamma below.")
-    }
-  }
-
-  while (objective(upper) < 0) {
-    upper <- 2 * upper
-
-    if (abs(upper) > 1e6) {
-      stop("Could not bracket gamma above.")
-    }
-  }
-
-  uniroot(objective, interval = c(lower, upper), tol = 1e-12)$root
-}
-
-identification_error <- function(violation, parameter,
-    mu = -.5) {
-
-  if (mu == 0) {
-    return(0)
-  }
-
-  integrate_real(function(theta) {
-    gap <- reference_irf(theta, violation, parameter) -
-      comparison_anchor_irf(theta, violation, parameter)
-
-    density_difference <- dnorm(theta, mean = mu, sd = 1) -
-      dnorm(theta, mean = 0, sd = 1)
-
-    gap * density_difference
-  })
-}
-
-population_did <- function(gamma, violation, parameter,
-    mu = -.5) {
-
-  focal_difference <- integrate_real(function(theta) {
-    (plogis(reference_lp(theta, violation, parameter) + gamma) -
-        comparison_anchor_irf(theta, violation, parameter)) * dnorm(theta, mean = mu, sd = 1)
-  })
-
-  reference_difference <- integrate_real(function(theta) {
-    (reference_irf(theta, violation, parameter) -
-        comparison_anchor_irf(theta, violation, parameter)) * dnorm(theta, mean = 0, sd = 1)
-  })
-
-  focal_difference - reference_difference
-}
-
-normal_bound <- function(eta, mu) {
-  if (any(!is.finite(eta)) || any(eta < 0) || 
-      any(!is.finite(mu))) {
-    stop("Invalid inputs to normal_bound().")
-  }
-
-  eta * (4 * pnorm(abs(mu) / 2) - 2)
-}
-
-distribution_free_bound <- function(eta) {
-  if (any(!is.finite(eta)) || any(eta < 0)) {
-    stop("Invalid eta in distribution_free_bound().")
-  }
-
-  2 * eta
-}
-
-fit_did_hc3 <- function(y_test, y_anchor, group) {
-  if (length(y_test) != length(y_anchor) || 
-      length(y_test) != length(group)) {
-    stop("Response and group vectors must have equal lengths.")
-  }
-
-  if (anyNA(y_test) || anyNA(y_anchor) || anyNA(group) || any(!is.finite(y_test)) || 
-      any(!is.finite(y_anchor)) || 
-      !all(group %in% c(0, 1))) {
-    stop("Invalid data in fit_did_hc3().")
-  }
-
+# DID = mean(Y_T - Y_A | G = 1) - mean(Y_T - Y_A | G = 0).
+# In this two-group regression, the exact HC3 variance is
+# s_1^2 / (n_1 - 1) + s_0^2 / (n_0 - 1), NOT s_1^2/n_1 + s_0^2/n_0.
+# Taking the response difference first retains within-person item covariance.
+fit_did <- function(y_test, y_anchor, group) {
+  stopifnot(length(y_test) == length(y_anchor), length(y_test) == length(group),
+            all(y_test %in% c(0, 1)), all(y_anchor %in% c(0, 1)),
+            all(group %in% c(0, 1)))
   difference <- y_test - y_anchor
   d0 <- difference[group == 0]
   d1 <- difference[group == 1]
-
   n0 <- length(d0)
   n1 <- length(d1)
-
-  if (n0 < 2L || n1 < 2L) {
-    stop("HC3 DID estimation requires at least two observations per group.")
-  }
-
-  estimate <- mean(d1) - mean(d0)
-
-  # Exact HC3 variance for the intercept-plus-binary-group regression.
-  variance <- var(d1) / (n1 - 1) +
-    var(d0) / (n0 - 1)
-
-  c(estimate = estimate, se = sqrt(variance), n0 = n0, n1 = n1)
+  if (min(n0, n1) < 2) stop("HC3 requires at least two people in each group.")
+  c(estimate = mean(d1) - mean(d0),
+    se = sqrt(var(d1) / (n1 - 1) + var(d0) / (n0 - 1)))
 }
 
-fit_logistic_dif <- function(y_test, matching, group) {
-  warning_messages <- character(0)
-  error_message <- ""
-
-  fit <- tryCatch(withCallingHandlers(glm(y_test ~ matching + group,
-        family = binomial(link = "logit"), control = glm.control(maxit = 50L)),
-      warning = function(w) {
-        warning_messages <<- c(warning_messages, conditionMessage(w))
-        invokeRestart("muffleWarning")
-      }
-),
-    error = function(e) {
-      error_message <<- conditionMessage(e)
-      NULL
+# Uniform logistic DIF. Record failed fits; do not redraw their datasets.
+# Warnings are retained, including warnings on otherwise valid fits.
+fit_logistic <- function(y_test, matching, group) {
+  warnings <- character(0)
+  fit <- tryCatch(withCallingHandlers(
+    glm(y_test ~ matching + group, family = binomial(),
+        control = glm.control(maxit = 50L)),
+    warning = function(w) {
+      warnings <<- c(warnings, conditionMessage(w))
+      invokeRestart("muffleWarning")
+    }), error = function(e) e)
+  reason <- ""
+  estimate <- se <- NA_real_
+  if (inherits(fit, "error")) {
+    reason <- conditionMessage(fit)
+  } else if (!isTRUE(fit$converged) || isTRUE(fit$boundary)) {
+    reason <- "Nonconvergence or boundary fit"
+  } else {
+    coefficients <- tryCatch(coef(summary(fit)), error = function(e) NULL)
+    if ("group" %in% rownames(coefficients)) {
+      estimate <- unname(coefficients["group", "Estimate"])
+      se <- unname(coefficients["group", "Std. Error"])
     }
-)
-
-  invalid_result <- function(reason) {
-    list(estimate = NA_real_, se = NA_real_, valid = FALSE, failed = TRUE,
-      warning_count = length(warning_messages), warning = length(warning_messages) > 0L,
-      reason = reason)
+    if (!is.finite(estimate) || !is.finite(se) || se <= 0) {
+      reason <- "Invalid group coefficient or standard error"
+    }
   }
-
-  if (is.null(fit)) {
-    return(invalid_result(if (nzchar(error_message)) error_message else "glm_error"))
-  }
-
-  if (!isTRUE(fit$converged)) {
-    return(invalid_result("nonconvergence"))
-  }
-
-  if (isTRUE(fit$boundary)) {
-    return(invalid_result("boundary_fit"))
-  }
-
-  coefficient_table <- tryCatch(coef(summary(fit)), error = function(e) NULL)
-
-  if (is.null(coefficient_table) || 
-      !("group" %in% rownames(coefficient_table))) {
-    return(invalid_result("missing_group_coefficient"))
-  }
-
-  estimate <- unname(coefficient_table["group", "Estimate"])
-  se <- unname(coefficient_table["group", "Std. Error"])
-
-  if (!is.finite(estimate) || !is.finite(se) || 
-      se <= 0) {
-    return(invalid_result("invalid_estimate_or_se"))
-  }
-
-  list(estimate = estimate, se = se, valid = TRUE, failed = FALSE,
-    warning_count = length(warning_messages), warning = length(warning_messages) > 0L,
-    reason = "")
+  if (nzchar(reason)) estimate <- se <- NA_real_
+  list(estimate = estimate, se = se, reason = reason,
+       warning = paste(unique(warnings), collapse = " | "))
 }
 
-binomial_mcse <- function(probability, n) {
-  if (!is.finite(n) || n <= 0) {
-    return(rep(NA_real_, length(probability)))
-  }
-
-  sqrt(probability * (1 - probability) / n)
-}
-
-performance <- function(estimates, standard_errors, truth,
-    alpha = .05) {
-
-  if (length(estimates) != length(standard_errors)) {
-    stop("Estimate and SE vectors must have equal lengths.")
-  }
-
-  if (length(truth) != 1L || !is.finite(truth) || length(alpha) != 1L || !is.finite(alpha) || 
-      alpha <= 0 || 
-      alpha >= 1) {
-    stop("Invalid truth or alpha in performance().")
-  }
-
-  valid <- is.finite(estimates) & 
-    is.finite(standard_errors) & 
-    standard_errors >= 0
-
-  n_total <- length(estimates)
+# Evaluate a confidence interval for a specified truth. Study 2 uses truth=tau.
+# bound=0 gives the ordinary interval; bound>0 widens both endpoints.
+interval_summary <- function(estimate, se, truth, bound = 0) {
+  valid <- is.finite(estimate) & is.finite(se) & se >= 0
   n_valid <- sum(valid)
-
-  if (n_valid < 2L) {
-    stop("At least two valid replications are required.")
-  }
-
-  estimates <- estimates[valid]
-  standard_errors <- standard_errors[valid]
-
-  critical <- qnorm(1 - alpha / 2)
-  lower <- estimates - critical * standard_errors
-  upper <- estimates + critical * standard_errors
-
-  empirical_sd <- sd(estimates)
-  mean_se <- mean(standard_errors)
-
-  coverage <- mean(lower <= truth & upper >= truth)
+  if (n_valid < 2) stop("Fewer than two valid replications.")
+  lower <- estimate[valid] - Z * se[valid] - bound
+  upper <- estimate[valid] + Z * se[valid] + bound
+  covered <- lower <= truth & truth <= upper
+  coverage <- mean(covered)
+  interval_length <- upper - lower
   rejection <- mean(lower > 0 | upper < 0)
-  negative <- mean(upper < 0)
-  positive <- mean(lower > 0)
-
-  data.frame(n_total = n_total, n_valid = n_valid, n_invalid = n_total - n_valid,
-    mean_estimate = mean(estimates), bias = mean(estimates) - truth,
-    bias_mcse = empirical_sd / sqrt(n_valid), empirical_sd = empirical_sd, mean_se = mean_se,
-    se_sd_ratio = if (empirical_sd > 0) {
-      mean_se / empirical_sd
-    } else {
-      NA_real_
-    },
-    rmse = sqrt(mean((estimates - truth)^2)), coverage = coverage,
-    coverage_mcse = binomial_mcse(coverage, n_valid), mean_width = mean(upper - lower),
-    rejection = rejection, rejection_mcse = binomial_mcse(rejection, n_valid),
-    excludes_zero_negative = negative, excludes_zero_positive = positive,
-    stringsAsFactors = FALSE)
+  data.frame(n_total = length(estimate), n_valid = n_valid,
+             n_failed = sum(!valid), coverage = coverage,
+             coverage_mcse = sqrt(coverage * (1 - coverage) / n_valid),
+             mean_length = mean(interval_length),
+             length_mcse = sd(interval_length) / sqrt(n_valid),
+             rejection = rejection,
+             rejection_mcse = sqrt(rejection * (1 - rejection) / n_valid))
 }
 
-sensitivity_summary <- function(estimates, standard_errors, tau, b_normal, b_df,
-    alpha = .05) {
-
-  if (length(estimates) != length(standard_errors)) {
-    stop("Estimate and SE vectors must have equal lengths.")
+# Read either the original repository schema or the revised raw-result schema.
+# Check the design before reusing draws; summaries alone cannot be reanalyzed.
+read_saved <- function(path, design, study) {
+  saved <- readRDS(path)
+  old <- saved$design
+  stopifnot(is.data.frame(old), is.data.frame(saved$raw),
+            "condition_id" %in% names(old), !anyDuplicated(old$condition_id))
+  old <- old[order(old$condition_id), ]
+  if (!"rho" %in% names(old) && "rho_M" %in% names(old)) old$rho <- old$rho_M
+  fields <- c("condition_id", "N", "tau", "gamma",
+              if (study == 1L) c("delta", "rho") else "eta_true")
+  stopifnot(all(fields %in% names(old)), nrow(old) == nrow(design))
+  for (name in fields) {
+    stopifnot(isTRUE(all.equal(old[[name]], design[[name]], tolerance = 1e-8)))
   }
-
-  if (length(tau) != 1L || !is.finite(tau) || length(b_normal) != 1L || length(b_df) != 1L || 
-      !is.finite(b_normal) || !is.finite(b_df) || b_normal < 0 || b_df < b_normal - 1e-12 || 
-      !is.finite(alpha) || alpha <= 0 || 
-      alpha >= 1) {
-    stop("Invalid inputs to sensitivity_summary().")
+  alpha <- if (!is.null(saved$alpha)) saved$alpha else saved$metadata$alpha
+  stopifnot(length(alpha) == 1L, isTRUE(all.equal(alpha, ALPHA)))
+  if ("mu" %in% names(old)) stopifnot(all(old$mu == MU))
+  if (!is.null(saved$mu)) stopifnot(identical(as.numeric(saved$mu), MU))
+  if (study == 2L && "violation" %in% names(old)) {
+    stopifnot(all(old$violation == "Smooth"), identical(saved$metadata$anchor_irf,
+              "eta + (1 - 2 * eta) * plogis(1.5 * theta)"))
   }
-
-  valid <- is.finite(estimates) & 
-    is.finite(standard_errors) & 
-    standard_errors >= 0
-
-  n_total <- length(estimates)
-  n_valid <- sum(valid)
-
-  if (n_valid < 2L) {
-    stop("At least two valid replications are required.")
-  }
-
-  estimates <- estimates[valid]
-  standard_errors <- standard_errors[valid]
-
-  critical <- qnorm(1 - alpha / 2)
-
-  unadjusted_lower <- estimates - critical * standard_errors
-  unadjusted_upper <- estimates + critical * standard_errors
-
-  methods <- c("Unadjusted", "Normal", "Distribution_free")
-
-  bounds <- c(0, b_normal, b_df)
-
-  answer <- lapply(seq_along(methods), function(j) {
-    # No clipping to [-1, 1].
-    lower <- unadjusted_lower - bounds[j]
-    upper <- unadjusted_upper + bounds[j]
-
-    covered <- lower <= tau & upper >= tau
-    excluded_negative <- upper < 0
-    excluded_positive <- lower > 0
-    excluded <- excluded_negative | excluded_positive
-
-    coverage <- mean(covered)
-    exclusion <- mean(excluded)
-    negative <- mean(excluded_negative)
-    positive <- mean(excluded_positive)
-
-    widths <- upper - lower
-
-    data.frame(method = methods[j], bound = bounds[j], n_total = n_total, n_valid = n_valid,
-      n_invalid = n_total - n_valid, coverage_tau = coverage,
-      coverage_mcse = binomial_mcse(coverage, n_valid), mean_width = mean(widths),
-      mean_width_mcse = sd(widths) / sqrt(n_valid), excludes_zero = exclusion,
-      excludes_zero_mcse = binomial_mcse(exclusion, n_valid),
-      excludes_zero_negative = negative,
-      excludes_zero_negative_mcse = binomial_mcse(negative, n_valid),
-      excludes_zero_positive = positive,
-      excludes_zero_positive_mcse = binomial_mcse(positive, n_valid), stringsAsFactors = FALSE
-)
-  })
-
-  answer <- do.call(rbind, answer)
-  rownames(answer) <- NULL
-  answer
-}
-
-# 3. Study 1: simulation --------------------------------------------------
-
-simulate_study1 <- function(replications, base_seed,
-    directory) {
-
-  prepare_directory(directory)
-
-  if (file.exists(file.path(directory, "simulation.rds"))) {
-    message("Study 1 simulation is enabled: existing saved results will be overwritten.")
-  }
-
-  mu <- -.5
-
-  design <- expand.grid(N = c(500L, 1000L, 2000L), tau = c(0, -.05, -.10),
-    delta = c(0, .25, .50), rho_M = c(1, .8, .6), KEEP.OUT.ATTRS = FALSE,
-    stringsAsFactors = FALSE)
-
-  design$condition_id <- seq_len(nrow(design))
-  design$mu <- mu
-
-  calibration <- data.frame(tau = c(0, -.05, -.10), stringsAsFactors = FALSE)
-
-  calibration$gamma <- vapply(calibration$tau,
-    function(tau) {
-      calibrate_gamma(tau = tau, violation = "Difficulty", parameter = 0, mu = mu)
-    },
-    numeric(1))
-
-  calibration$tau_achieved <- vapply(seq_len(nrow(calibration)),
-    function(i) {
-      tau_from_gamma(gamma = calibration$gamma[i], violation = "Difficulty", parameter = 0,
-        mu = mu)
-    },
-    numeric(1))
-
-  design$gamma <- calibration$gamma[ match(design$tau, calibration$tau) ]
-
-  design$condition_seed <- as.double(base_seed) +
-    1009 * design$condition_id
-
-  design <- design[ , c("condition_id", "N", "tau", "delta", "rho_M",
-      "mu", "gamma", "condition_seed") ]
-
-  stopifnot(nrow(design) == 81L, max(abs(calibration$tau_achieved - calibration$tau)) < 1e-8
-)
-
-  raw_list <- vector("list", nrow(design))
-
-  for (i in seq_len(nrow(design))) {
-    d <- design[i, ]
-    set_condition_seed(base_seed, d$condition_id)
-
-    did <- numeric(replications)
-    did_se <- numeric(replications)
-    n0 <- integer(replications)
-    n1 <- integer(replications)
-
-    logistic <- rep(NA_real_, replications)
-    logistic_se <- rep(NA_real_, replications)
-    logistic_valid <- logical(replications)
-    logistic_failed <- logical(replications)
-    logistic_warning <- logical(replications)
-    logistic_warning_count <- integer(replications)
-    logistic_failure_reason <- character(replications)
-
-    matching_error_sd <- sqrt((1 - d$rho_M) / d$rho_M)
-
-    for (r in seq_len(replications)) {
-      group <- rbinom(d$N, size = 1L, prob = .5)
-      theta <- rnorm(d$N, mean = mu * group, sd = 1)
-
-      y_anchor <- rbinom(d$N, size = 1L, prob = anchor_irf(theta))
-
-      y_test <- rbinom(d$N, size = 1L, prob = plogis(1.5 * theta + d$gamma * group))
-
-      matching_error <- if (matching_error_sd == 0) {
-        numeric(d$N)
-      } else {
-        rnorm(d$N, mean = 0, sd = matching_error_sd)
-      }
-
-      matching <- theta + d$delta * group + matching_error
-
-      did_fit <- fit_did_hc3(y_test, y_anchor, group)
-      logistic_fit <- fit_logistic_dif(y_test, matching, group)
-
-      did[r] <- did_fit["estimate"]
-      did_se[r] <- did_fit["se"]
-      n0[r] <- did_fit["n0"]
-      n1[r] <- did_fit["n1"]
-
-      logistic[r] <- logistic_fit$estimate
-      logistic_se[r] <- logistic_fit$se
-      logistic_valid[r] <- logistic_fit$valid
-      logistic_failed[r] <- logistic_fit$failed
-      logistic_warning[r] <- logistic_fit$warning
-      logistic_warning_count[r] <- logistic_fit$warning_count
-      logistic_failure_reason[r] <- logistic_fit$reason
-    }
-
-    raw_list[[i]] <- data.frame(condition_id = rep(d$condition_id, replications),
-      replication = seq_len(replications), did = did, did_se = did_se, n0 = n0, n1 = n1,
-      logistic = logistic, logistic_se = logistic_se, logistic_valid = logistic_valid,
-      logistic_failed = logistic_failed, logistic_warning = logistic_warning,
-      logistic_warning_count = logistic_warning_count,
-      logistic_failure_reason = logistic_failure_reason, stringsAsFactors = FALSE)
-
-    cat(sprintf(
-        "Study 1: condition %d/%d completed (N=%d, tau=%.2f, delta=%.2f, rho_M=%.2f).\n",
-        i, nrow(design), d$N, d$tau, d$delta, d$rho_M))
-
-    flush.console()
-  }
-
-  raw <- do.call(rbind, raw_list)
-  rownames(raw) <- NULL
-
-  metadata <- make_metadata(study = "Study 1", replications = replications,
-    base_seed = base_seed, alpha = ALPHA)
-
-  metadata$n_conditions <- nrow(design)
-  metadata$matching_error_variance <- "(1 - rho_M) / rho_M"
-  metadata$logistic_model <- "Y_T ~ M + G"
-  metadata$logistic_inference <- "Model-based Wald confidence interval"
-
-  simulation <- list(raw = raw, design = design, calibration = calibration,
-    metadata = metadata)
-
-  saveRDS(simulation, file.path(directory, "simulation.rds"))
-
-  save_run_information(metadata, directory)
-
-  cat("Study 1 simulation saved.\n")
-  invisible(simulation)
-}
-
-# 4. Study 2: simulation --------------------------------------------------
-
-simulate_study2 <- function(replications, base_seed,
-    directory) {
-
-  prepare_directory(directory)
-
-  if (file.exists(file.path(directory, "simulation.rds"))) {
-    message("Study 2 simulation is enabled: existing saved results will be overwritten.")
-  }
-
-  mu <- -.5
-  mu_assumed <- mu
-
-  forms <- "Smooth"
-  eta_values <- c(0, .05, .10, .15)
-
-  calibration <- expand.grid(eta_true = eta_values, violation = forms,
-    KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE)
-
-  calibration <- calibration[ order(match(calibration$violation, forms), calibration$eta_true
-), , drop = FALSE ]
-
-  rownames(calibration) <- NULL
-  calibration$calibration_id <- seq_len(nrow(calibration))
-  calibration$eta_assumed <- calibration$eta_true
-  calibration$mu <- mu
-  calibration$mu_assumed <- mu_assumed
-
-  calibration$parameter <- vapply(seq_len(nrow(calibration)),
-    function(i) {
-      calibrate_parameter(eta = calibration$eta_true[i], violation = calibration$violation[i]
-)
-    },
-    numeric(1))
-
-  calibration$parameter_name <- "eta"
-
-  calibration$eta_achieved <- vapply(seq_len(nrow(calibration)),
-    function(i) {
-      calibration$parameter[i]
-    },
-    numeric(1))
-
-  calibration$id_error <- vapply(seq_len(nrow(calibration)),
-    function(i) {
-      identification_error(violation = calibration$violation[i],
-        parameter = calibration$parameter[i], mu = mu)
-    },
-    numeric(1))
-
-  calibration$b_normal <- normal_bound(calibration$eta_assumed, calibration$mu_assumed)
-
-  calibration$b_df <- distribution_free_bound(calibration$eta_assumed)
-  calibration$absolute_id_error <- abs(calibration$id_error)
-
-  calibration$ratio_normal <- ifelse(calibration$b_normal == 0, 0,
-    abs(calibration$id_error) / calibration$b_normal)
-
-  calibration$ratio_df <- ifelse(calibration$b_df == 0, 0,
-    abs(calibration$id_error) / calibration$b_df)
-
-  stopifnot(nrow(calibration) == 4L,
-    max(abs(calibration$eta_achieved - calibration$eta_true)) < 1e-8,
-    all(abs(calibration$id_error) <= calibration$b_normal + 1e-9),
-    all(calibration$b_normal <= calibration$b_df + 1e-12))
-
-  design_index <- expand.grid(N = c(500L, 1000L, 2000L), tau = c(0, -.05, -.10),
-    calibration_id = calibration$calibration_id, KEEP.OUT.ATTRS = FALSE,
-    stringsAsFactors = FALSE)
-
-  calibration_match <- match(design_index$calibration_id, calibration$calibration_id)
-
-  design <- cbind(data.frame(condition_id = seq_len(nrow(design_index)), N = design_index$N,
-      tau = design_index$tau, stringsAsFactors = FALSE),
-    calibration[calibration_match, , drop = FALSE])
-
-  rownames(design) <- NULL
-
-  gamma_grid <- expand.grid(tau = c(0, -.05, -.10),
-    calibration_id = calibration$calibration_id, KEEP.OUT.ATTRS = FALSE,
-    stringsAsFactors = FALSE)
-
-  gamma_grid$gamma <- vapply(seq_len(nrow(gamma_grid)),
-    function(i) {
-      j <- match(gamma_grid$calibration_id[i], calibration$calibration_id)
-
-      calibrate_gamma(tau = gamma_grid$tau[i], violation = calibration$violation[j],
-        parameter = calibration$parameter[j], mu = mu)
-    },
-    numeric(1))
-
-  gamma_grid$tau_achieved <- vapply(seq_len(nrow(gamma_grid)),
-    function(i) {
-      j <- match(gamma_grid$calibration_id[i], calibration$calibration_id)
-
-      tau_from_gamma(gamma = gamma_grid$gamma[i], violation = calibration$violation[j],
-        parameter = calibration$parameter[j], mu = mu)
-    },
-    numeric(1))
-
-  gamma_grid$population_DID <- vapply(seq_len(nrow(gamma_grid)),
-    function(i) {
-      j <- match(gamma_grid$calibration_id[i], calibration$calibration_id)
-
-      population_did(gamma = gamma_grid$gamma[i], violation = calibration$violation[j],
-        parameter = calibration$parameter[j], mu = mu)
-    },
-    numeric(1))
-
-  gamma_key <- paste(gamma_grid$calibration_id, gamma_grid$tau, sep = "_")
-
-  design_key <- paste(design$calibration_id, design$tau, sep = "_")
-
-  gamma_match <- match(design_key, gamma_key)
-
-  design$gamma <- gamma_grid$gamma[gamma_match]
-  design$tau_achieved <- gamma_grid$tau_achieved[gamma_match]
-  design$population_DID <- gamma_grid$population_DID[gamma_match]
-  design$condition_seed <- as.double(base_seed) +
-    1009 * design$condition_id
-
-  stopifnot(nrow(design) == 36L, !anyNA(gamma_match),
-    max(abs(design$tau_achieved - design$tau)) < 1e-8, max(abs(
-      design$population_DID - design$tau - design$id_error)) < 1e-8)
-
-  raw_list <- vector("list", nrow(design))
-
-  for (i in seq_len(nrow(design))) {
-    d <- design[i, ]
-    set_condition_seed(base_seed, d$condition_id)
-
-    did <- numeric(replications)
-    did_se <- numeric(replications)
-    n0 <- integer(replications)
-    n1 <- integer(replications)
-
-    for (r in seq_len(replications)) {
-      group <- rbinom(d$N, size = 1L, prob = .5)
-      theta <- rnorm(d$N, mean = mu * group, sd = 1)
-
-      y_anchor <- rbinom(d$N, size = 1L,
-        prob = comparison_anchor_irf(theta, d$violation, d$parameter))
-
-      test_probability <- plogis(reference_lp(theta = theta, violation = d$violation,
-          parameter = d$parameter) + d$gamma * group)
-
-      y_test <- rbinom(d$N, size = 1L, prob = test_probability)
-
-      fit <- fit_did_hc3(y_test, y_anchor, group)
-
-      did[r] <- fit["estimate"]
-      did_se[r] <- fit["se"]
-      n0[r] <- fit["n0"]
-      n1[r] <- fit["n1"]
-    }
-
-    raw_list[[i]] <- data.frame(condition_id = rep(d$condition_id, replications),
-      replication = seq_len(replications), did = did, did_se = did_se, n0 = n0, n1 = n1,
-      stringsAsFactors = FALSE)
-
-    cat(sprintf("Study 2: condition %d/%d completed (N=%d, tau=%.2f, %s, eta=%.2f).\n",
-        i, nrow(design), d$N, d$tau, d$violation, d$eta_true))
-
-    flush.console()
-  }
-
-  raw <- do.call(rbind, raw_list)
-  rownames(raw) <- NULL
-
-  metadata <- make_metadata(study = "Study 2", replications = replications,
-    base_seed = base_seed, alpha = ALPHA)
-
-  metadata$n_conditions <- nrow(design)
-  metadata$eta_values <- eta_values
-  metadata$test_reference_irf <- "plogis(1.5 * theta)"
-  metadata$test_focal_irf <- "plogis(1.5 * theta + gamma)"
-  metadata$anchor_irf <- "eta + (1 - 2 * eta) * plogis(1.5 * theta)"
-  metadata$anchor_discrimination <- NULL
-  metadata$anchor_difficulty <- NULL
-  metadata$tau_values <- c(0, -.05, -.10)
-  metadata$sample_sizes <- c(500L, 1000L, 2000L)
-  metadata$violation_forms <- forms
-  metadata$eta_assumed_equals_eta_true <- TRUE
-  metadata$mu_assumed_equals_mu_true <- TRUE
-  metadata$external_calibration_uncertainty_included <- FALSE
-  metadata$methods <- c("Unadjusted", "Normal", "Distribution_free")
-
-  simulation <- list(raw = raw, design = design, calibration = calibration,
-    gamma_calibration = gamma_grid, metadata = metadata)
-
-  saveRDS(simulation, file.path(directory, "simulation.rds"))
-
-  save_run_information(metadata, directory)
-
-  cat("Study 2 simulation saved.\n")
-  invisible(simulation)
-}
-
-# 5. Figures 4 and 5 ------------------------------------------------------
-
-plot_rejection_grid <- function(data, directory, study, alpha = .05) {
-  taus <- c(0, -.05, -.10); Ns <- c(500, 1000, 2000)
-  near <- function(x, y) abs(x-y) < 1e-8
-  rates <- function(d, variable = "rejection") {
-    if (nrow(d) != 3L) stop("Expected three effect sizes in each series.")
-    ii <- vapply(taus, function(t) {
-      z <- which(near(d$tau, t)); if (length(z) != 1L) stop("Missing/duplicated tau."); z
-    }, integer(1))
-    y <- d[[variable]][ii]
-    if (length(y) != 3L || any(!is.finite(y)) || any(y<0 | y>1)) stop("Invalid rates.")
-    y
-  }
-  open_device <- function(path, height) {
-    # Native macOS PDF avoids X11/Cairo and improves Greek-font portability.
-    if (identical(Sys.info()[["sysname"]], "Darwin") && isTRUE(capabilities("aqua"))) {
-      grDevices::quartz(type = "pdf", file = path, width = 9.4, height = height,
-                       family = FIGURE_FONT, pointsize = 12)
-    } else if (isTRUE(capabilities("cairo"))) {
-      grDevices::cairo_pdf(path, width = 9.4, height = height, family = FIGURE_FONT, pointsize = 12)
-    } else {
-      stop("PDF output requires native macOS Quartz or Cairo support in R.")
-    }
-  }
-  blank <- function() {
-    # Fix coordinates explicitly: axes() must not change subsequent strip alignment.
-    par(mar = c(0, 0, 0, 0), cex = 1, xaxs = "i", yaxs = "i")
-    plot.new()
-    plot.window(xlim = c(0, 1), ylim = c(0, 1), xaxs = "i", yaxs = "i")
-  }
-  axes <- function(title = NULL, row_label = NULL) {
-    par(mar = c(2.3, 2.8, 2.5, .8), mgp = c(1.7, .5, 0), tcl = -.2, las = 1, xaxs = "i", yaxs = "i", cex = 1)
-    plot(NA, xlim = c(.005, -.105), ylim = c(-.025, 1.025), xlab = "", ylab = "", xaxt = "n", yaxt = "n", bty = "l")
-    abline(h = c(.25, .5, .75, 1), col = "grey92", lwd = .6)
-    abline(h = alpha, col = "grey60", lty = 3, lwd = .8)
-    axis(1, at = taus, labels = c("0", "-0.05", "-0.10"), cex.axis = .95)
-    axis(2, at = seq(0, 1, .2), labels = c("0", ".2", ".4", ".6", ".8", "1.0"), cex.axis = .95)
-    if (!is.null(title)) mtext(title, side = 3, line = .8, cex = 1.05, las = 1)
-    if (!is.null(row_label)) mtext(row_label, side = 2, line = 3.1, las = 1, adj = 1, cex = 1.05, xpd = NA)
-  }
-  ylabel <- function(at = .55) mtext("Rejection rate", side = 2, outer = TRUE,
-                                  line = 2.5, las = 0, at = at, cex = 1.2)
-  tau_strip <- function() {blank(); text(.5, .5, expression(tau), cex = 1.15)}
-  draw <- function(ys, cols, ltys, pchs, filled, widths, order = seq_along(ys)) {
-    for (j in order) lines(taus, ys[[j]], col = cols[j], lty = ltys[j], lwd = widths[j])
-    for (j in order) points(taus, ys[[j]], col = cols[j], pch = pchs[j],
-                          bg = if (filled[j]) cols[j] else "white", cex = .95, lwd = 1.1)
-  }
-  verify_pdf <- function(path) {
-    if (!file.exists(path) || is.na(file.info(path)$size) || file.info(path)$size == 0) stop("No PDF created: ", path)
-    message("Figure saved: ", normalizePath(path, winslash = "/", mustWork = TRUE))
-  }
-  path <- file.path(directory, paste0("figure", study+3L, ".pdf"))
-  plot4 <- function(path) {
-    # Validate the full crossed design before drawing.
-    for (dd in c(0, .25, .5)) for (r in c(1, .8, .6)) for (nn in Ns) {
-      z <- data[near(data$delta, dd) & near(data$rho_M, r) & data$N == nn, , drop = FALSE]
-      rates(z); rates(z, "did_rejection")
-    }
-    open_device(path, 8.85)
-    on.exit(dev.off(), add = TRUE)
-    par(oma = c(.4, 4.8, .4, .3), family = FIGURE_FONT)
-    # For each block: heading, three panels, tau, condition legend.
-    layout(rbind(c(1, 1, 1), c(2, 3, 4), c(5, 5, 5), c(6, 6, 6),
-                 c(0, 0, 0), # Small empty gap between blocks A and B.
-                 c(7, 7, 7), c(8, 9, 10), c(11, 11, 11), c(12, 12, 12)),
-           heights = c(.32, 2.3, .24, .48, .10, .32, 2.3, .24, .48))
-    cols <- c("black", "grey35", "grey45", "grey55")
-    ltys <- c(1, 2, 4, 5); pchs <- c(21, 21, 24, 22); widths <- c(1.9, 1.3, 1.3, 1.3)
-    for (block in 1:2) {
-      blank()
-      # Reset cex in blank(): layout() otherwise shrinks the first heading.
-      heading <- if (block == 1) "A" else "B"
-      text(0, .5, heading, adj = c(0, .5), cex = 1.2, font = 2)
-      for (nn in Ns) {
-        axes(bquote(italic(N) == .(format(nn, big.mark = ",", trim = TRUE))))
-        oracle <- data[data$N == nn & near(data$delta, 0) & near(data$rho_M, 1), , drop = FALSE]
-        ys <- list(rates(oracle, "did_rejection"))
-        for (k in 1:3) {
-          dd <- if (block == 1) c(0, .25, .5)[k] else 0
-          r <- if (block == 1) 1 else c(1, .8, .6)[k]
-          z <- data[data$N == nn & near(data$delta, dd) & near(data$rho_M, r), , drop = FALSE]
-          ys[[k+1]] <- rates(z)
-        }
-        draw(ys, cols, ltys, pchs, c(TRUE, FALSE, FALSE, FALSE), widths, order = c(2, 3, 4, 1))
-      }
-      tau_strip(); blank()
-      labs <- if (block == 1) expression(DID, paste("Logistic: ", delta == 0),
-                    paste("Logistic: ", delta == .25), paste("Logistic: ", delta == .50)) else
-               expression(DID, paste("Logistic: ", rho == 1.00),
-                    paste("Logistic: ", rho == .80), paste("Logistic: ", rho == .60))
-      legend("center", legend = labs, horiz = TRUE, bty = "n", cex = 1.0,
-             col = cols, lty = ltys, lwd = widths, pch = pchs, pt.bg = c("black", rep("white", 3)), seg.len = 1.8)
-    }
-    ylabel(.55)
-  }
-  plot5 <- function(path) {
-    methods <- c("Unadjusted", "Normal", "Distribution_free");etas <- c(.05, .10, .15)
-    for (e in etas) for (nn in Ns) for (m in methods) rates(data[near(data$eta_true, e) & data$N == nn & data$method == m, , drop = FALSE])
-    open_device(path, 9.2);on.exit(dev.off(), add = TRUE)
-    layout(rbind(c(1, 2, 3), c(4, 5, 6), c(7, 8, 9), c(10, 10, 10), c(11, 11, 11)),
-           heights = c(2.3, 2.3, 2.3, .3, .55))
-    par(oma = c(.4, 6.6, .4, .3), family = FIGURE_FONT)
-    cols <- c("grey45", "black", "grey30");ltys <- c(2, 1, 4);pchs <- c(21, 21, 24);widths <- c(1.3, 1.9, 1.3)
-    for (rr in 1:3) for (cc in 1:3) {
-      axes(if (rr == 1) bquote(italic(N) == .(format(Ns[cc], big.mark = ",", trim = TRUE))) else NULL,
-           if (cc == 1) bquote(eta == .(sprintf("%.2f", etas[rr]))) else NULL)
-      ys <- lapply(methods, function(m) rates(data[near(data$eta_true, etas[rr]) & data$N == Ns[cc] & data$method == m, , drop = FALSE]))
-      draw(ys, cols, ltys, pchs, c(FALSE, TRUE, FALSE), widths, c(1, 3, 2))
-    }
-    tau_strip();blank()
-    legend("center", legend = c("Unadjusted", "Normal bound", "Distribution-free bound"),
-           horiz = TRUE, bty = "n", cex = 1.05, col = cols, lty = ltys, lwd = widths, pch = pchs, pt.bg = c("white", "black", "white"))
-    mtext("Rejection rate", side = 2, outer = TRUE, line = 4.8, las = 0, at = .55, cex = 1.2)
-  }
+  fields <- c("condition_id", "replication", "did", "did_se",
+              if (study == 1L) c("logistic", "logistic_se"))
+  stopifnot(all(fields %in% names(saved$raw)))
+  raw <- saved$raw[, fields]
+  stopifnot(!anyNA(raw$condition_id), !anyNA(raw$replication),
+            !anyDuplicated(raw[c("condition_id", "replication")]),
+            setequal(raw$condition_id, design$condition_id),
+            all(table(raw$condition_id) >= 2L),
+            length(unique(as.integer(table(raw$condition_id)))) == 1L)
   if (study == 1L) {
-    plot4(path)
-  } else if (study == 2L) {
-    plot5(path)
-  } else {
-    stop("Unknown study.")
+    raw$failure <- if ("failure" %in% names(saved$raw)) saved$raw$failure else
+      saved$raw$logistic_failure_reason
+    raw$warning <- if ("warning" %in% names(saved$raw)) saved$raw$warning else
+      ifelse(saved$raw$logistic_warning, "Warning in original run", "")
+    stopifnot(length(raw$failure) == nrow(raw), length(raw$warning) == nrow(raw))
   }
-  verify_pdf(path)
-  invisible(path)
+  message("Reusing ", path, " (", nrow(raw) / nrow(design), " replications per condition).")
+  raw
 }
 
-# 6. Appendix tables and figure data --------------------------------------
-
-# CUP table markup used in the manuscript; requires its template and booktabs.
-write_appendix_tables <- function(did, logistic, directory) {
-  decimal <- function(x, digits = 3L) {
-    sub("^(-?)0\\.", "\\1.", sprintf(paste0("%.", digits, "f"), x))
+# Calibrate the constant logit shift to the desired probability-scale effect.
+# The anchor changes in Study 2; the test IRFs and gamma do not.
+# The interval [-1, 1] brackets the roots for all three specified effect sizes.
+calibration <- data.frame(tau = TAU_VALUES, gamma = 0, tau_achieved = 0)
+for (i in seq_len(nrow(calibration))) {
+  target <- calibration$tau[i]
+  if (target != 0) {
+    calibration$gamma[i] <- uniroot(function(gamma) {
+      normal_mean(function(theta) plogis(1.5 * theta + gamma) -
+                    plogis(1.5 * theta)) - target
+    }, c(-1, 1), tol = 1e-12)$root
   }
-  row <- function(values) paste0(paste(values, collapse = " & "), " \\\\")
-  sample_label <- function(n) format(n, big.mark = ",", scientific = FALSE, trim = TRUE)
-  start <- function(caption, label, columns) c("\\begin{table}[!htbp]", "\\tabcolsep=0pt",
-    paste0("\\TBL{\\caption{", caption, "%"), paste0("\\label{", label, "}}}"),
-    "{\\begin{fntable}",
-    paste0("\\begin{tabular*}{\\textwidth}{@{\\extracolsep{\\fill}}", columns, "@{}}"),
-    "\\toprule")
-  finish <- function(note) c("\\botrule", "\\end{tabular*}",
-    paste0("\\footnotetext[]{\\textit{Note:} ", note, "}"), "\\end{fntable}}", "\\end{table}"
-)
+  gamma <- calibration$gamma[i]
+  calibration$tau_achieved[i] <- normal_mean(function(theta) {
+    plogis(1.5 * theta + gamma) - plogis(1.5 * theta)
+  })
+}
+stopifnot(max(abs(calibration$tau - calibration$tau_achieved)) < 1e-8)
+write.csv(calibration, file.path(OUTPUT_DIR, "gamma_calibration.csv"), row.names = FALSE)
 
-  did <- did[order(did$N, -did$tau), ]
-  lines <- start("DID Performance in Study~1", "tab:sim1_did", "rrrrrrr")
-  lines <- c(lines, row(c("\\TCH{$N$}", "\\TCH{$\\tau$}", "\\TCH{Bias}", "\\TCH{RMSE}",
-    "\\TCH{SE/SD}", "\\TCH{Coverage}", "\\TCH{Rejection}")), "\\midrule")
-  for (i in seq_len(nrow(did))) {
-    d <- did[i, ]
-    new_N <- i == 1L || d$N != did$N[i - 1L]
-    if (new_N && i > 1L) lines <- c(lines, "\\addlinespace")
-    bias <- round(d$bias, 4)
-    if (bias == 0) bias <- 0  # Avoid printing negative zero.
-    lines <- c(lines, row(c(if (new_N) sample_label(d$N) else "", decimal(d$tau, 2),
-      decimal(bias, 4), decimal(d$rmse), sprintf("%.3f", d$se_sd_ratio),
-      decimal(d$coverage, 4), decimal(d$rejection, 4))))
-  }
-  counts <- unique(did$n_valid)
-  count_note <- if (length(counts) == 1L) {
-    paste0("Each row pools ", sample_label(counts), " valid replications")
+# 3. Study 1: unchanged design and rejection-rate presentation ------------------
+
+if (RUN_STUDY1) {
+  folder <- file.path(OUTPUT_DIR, "study1")
+  dir.create(folder, recursive = TRUE, showWarnings = FALSE)
+  design1 <- expand.grid(N = N_VALUES, tau = TAU_VALUES,
+                        delta = c(0, .25, .50), rho = c(1, .8, .6),
+                        KEEP.OUT.ATTRS = FALSE)
+  design1$condition_id <- seq_len(nrow(design1))
+  design1$gamma <- calibration$gamma[match(design1$tau, calibration$tau)]
+  design1$seed <- 2026L + 1009L * design1$condition_id
+
+  if (nzchar(STUDY1_SAVED)) {
+    raw1 <- read_saved(STUDY1_SAVED, design1, study = 1L)
   } else {
-    "Each row pools valid replications"
+    runs <- vector("list", nrow(design1))
+    for (i in seq_len(nrow(design1))) {
+      d <- design1[i, ]
+      set.seed(d$seed)
+      one <- data.frame(condition_id = d$condition_id, replication = seq_len(N_REP),
+                        did = NA_real_, did_se = NA_real_, logistic = NA_real_,
+                        logistic_se = NA_real_, failure = "", warning = "",
+                        stringsAsFactors = FALSE)
+      for (r in seq_len(N_REP)) {
+        group <- rbinom(d$N, 1, .5)
+        theta <- rnorm(d$N, MU * group, 1)
+        y_anchor <- rbinom(d$N, 1, plogis(1.5 * theta))
+        y_test <- rbinom(d$N, 1, plogis(1.5 * theta + d$gamma * group))
+        error <- if (d$rho == 1) numeric(d$N) else
+          rnorm(d$N, 0, sqrt((1 - d$rho) / d$rho))
+        matching <- theta + d$delta * group + error
+        did <- fit_did(y_test, y_anchor, group)
+        logistic <- fit_logistic(y_test, matching, group)
+        one$did[r] <- did["estimate"]
+        one$did_se[r] <- did["se"]
+        one$logistic[r] <- logistic$estimate
+        one$logistic_se[r] <- logistic$se
+        one$failure[r] <- logistic$reason
+        one$warning[r] <- logistic$warning
+      }
+      runs[[i]] <- one
+      message("Study 1: ", i, "/", nrow(design1))
+    }
+    raw1 <- do.call(rbind, runs)
+  }
+  stopifnot(all(is.finite(raw1$did)), all(is.finite(raw1$did_se)), all(raw1$did_se >= 0))
+  if (!nzchar(STUDY1_SAVED)) {
+    saveRDS(list(design = design1, raw = raw1, alpha = ALPHA, mu = MU),
+            file.path(folder, "simulation.rds"))
+  }
+  write.csv(design1, file.path(folder, "design.csv"), row.names = FALSE)
+
+  # Pool raw DID estimates over the nine matching-variable conditions.
+  # Pooling is valid here because those conditions do not change DID's inputs.
+  data1 <- merge(raw1, design1, by = "condition_id")
+  keys <- expand.grid(N = N_VALUES, tau = TAU_VALUES)
+  did_rows <- vector("list", nrow(keys))
+  for (i in seq_len(nrow(keys))) {
+    x <- data1[data1$N == keys$N[i] & data1$tau == keys$tau[i], ]
+    did_rows[[i]] <- cbind(keys[i, ],
+      data.frame(bias = mean(x$did) - keys$tau[i],
+                 rmse = sqrt(mean((x$did - keys$tau[i])^2)),
+                 se_sd_ratio = mean(x$did_se) / sd(x$did)),
+      interval_summary(x$did, x$did_se, keys$tau[i]))
+  }
+  did_summary <- do.call(rbind, did_rows)
+  logistic_rows <- vector("list", nrow(design1))
+  for (i in seq_len(nrow(design1))) {
+    x <- raw1[raw1$condition_id == i, ]
+    valid <- is.finite(x$logistic) & is.finite(x$logistic_se) & x$logistic_se > 0
+    rate <- if (any(valid)) mean(abs(x$logistic[valid] / x$logistic_se[valid]) > Z) else NA_real_
+    logistic_rows[[i]] <- cbind(design1[i, ], data.frame(
+      n_total = nrow(x), n_valid = sum(valid), n_failed = sum(!valid),
+      n_warned = sum(nzchar(x$warning)), rejection = rate,
+      rejection_mcse = if (any(valid)) sqrt(rate * (1 - rate) / sum(valid)) else NA_real_))
+  }
+  logistic_summary <- do.call(rbind, logistic_rows)
+  if (any(logistic_summary$n_failed > 0)) {
+    warning("Some logistic fits failed; see n_failed and n_valid in logistic_summary.csv.")
+  }
+  write.csv(did_summary, file.path(folder, "did_summary.csv"), row.names = FALSE)
+  write.csv(logistic_summary, file.path(folder, "logistic_summary.csv"), row.names = FALSE)
+}
+
+# 4. Study 2: coverage and interval length -------------------------------------
+
+if (RUN_STUDY2) {
+  folder <- file.path(OUTPUT_DIR, "study2")
+  dir.create(folder, recursive = TRUE, showWarnings = FALSE)
+  design2 <- expand.grid(N = N_VALUES, tau = TAU_VALUES, eta_true = ETA_TRUE_VALUES,
+                        KEEP.OUT.ATTRS = FALSE)
+  design2$condition_id <- seq_len(nrow(design2))
+  design2$gamma <- calibration$gamma[match(design2$tau, calibration$tau)]
+  design2$seed <- 2027L + 1009L * design2$condition_id
+
+  # Separate the actual DGP discrepancy (eta_true) from the analyst's bound
+  # (eta_assumed). Neither is estimated in this simulation.
+  normal_factor <- 4 * pnorm(abs(MU) / 2) - 2
+  error_per_eta <- 2 * normal_mean(function(theta) plogis(1.5 * theta)) - 1
+  design2$id_error <- design2$eta_true * error_per_eta
+  design2$population_did <- design2$tau + design2$id_error
+  design2$bound_normal <- design2$eta_true * normal_factor
+  design2$bound_df <- 2 * design2$eta_true
+  stopifnot(all(abs(design2$id_error) <= design2$bound_normal + 1e-10),
+            all(design2$bound_normal <= design2$bound_df))
+
+  if (nzchar(STUDY2_SAVED)) {
+    raw2 <- read_saved(STUDY2_SAVED, design2, study = 2L)
+  } else {
+    runs <- vector("list", nrow(design2))
+    for (i in seq_len(nrow(design2))) {
+      d <- design2[i, ]
+      set.seed(d$seed)
+      one <- data.frame(condition_id = d$condition_id, replication = seq_len(N_REP),
+                        did = NA_real_, did_se = NA_real_)
+      for (r in seq_len(N_REP)) {
+        group <- rbinom(d$N, 1, .5)
+        theta <- rnorm(d$N, MU * group, 1)
+        p0 <- plogis(1.5 * theta)
+        p_anchor <- d$eta_true + (1 - 2 * d$eta_true) * p0
+        y_anchor <- rbinom(d$N, 1, p_anchor)
+        y_test <- rbinom(d$N, 1, plogis(1.5 * theta + d$gamma * group))
+        did <- fit_did(y_test, y_anchor, group)
+        one$did[r] <- did["estimate"]
+        one$did_se[r] <- did["se"]
+      }
+      runs[[i]] <- one
+      message("Study 2: ", i, "/", nrow(design2))
+    }
+    raw2 <- do.call(rbind, runs)
+  }
+  stopifnot(all(is.finite(raw2$did)), all(is.finite(raw2$did_se)), all(raw2$did_se >= 0))
+  if (!nzchar(STUDY2_SAVED)) {
+    saveRDS(list(design = design2, raw = raw2, alpha = ALPHA, mu = MU,
+                 eta_multipliers = ETA_MULTIPLIERS),
+            file.path(folder, "simulation.rds"))
+  }
+  write.csv(design2, file.path(folder, "design.csv"), row.names = FALSE)
+
+  # Analyze every method and eta choice on the SAME simulated datasets.
+  # Reanalysis costs little and needs no additional simulation conditions.
+  methods <- c("Unadjusted", "Normal", "Distribution-free")
+  rows <- list()
+  row_id <- 0L
+  diagnostics <- vector("list", nrow(design2))
+  for (i in seq_len(nrow(design2))) {
+    d <- design2[i, ]
+    x <- raw2[raw2$condition_id == d$condition_id, ]
+    for (multiplier in ETA_MULTIPLIERS) {
+      eta_assumed <- multiplier * d$eta_true
+      bounds <- c(0, eta_assumed * normal_factor, 2 * eta_assumed)
+      for (j in seq_along(methods)) {
+        row_id <- row_id + 1L
+        rows[[row_id]] <- cbind(d[, c("condition_id", "N", "tau", "eta_true", "id_error")],
+          data.frame(method = methods[j], eta_multiplier = multiplier,
+                     eta_assumed = eta_assumed, bound = bounds[j],
+                     bound_covers_error = bounds[j] >= abs(d$id_error) - 1e-12,
+                     stringsAsFactors = FALSE),
+          interval_summary(x$did, x$did_se, truth = d$tau, bound = bounds[j]))
+      }
+    }
+    # Check the ordinary CI for its own estimand, population DID.
+    # Its coverage can be nominal even when coverage of tau fails.
+    diagnostics[[i]] <- cbind(d,
+      data.frame(mean_did = mean(x$did), empirical_error = mean(x$did) - d$tau,
+                 empirical_error_mcse = sd(x$did) / sqrt(nrow(x))),
+      interval_summary(x$did, x$did_se, truth = d$population_did))
+  }
+  sensitivity <- do.call(rbind, rows)
+  main <- sensitivity[sensitivity$eta_multiplier == 1, ]
+  write.csv(main, file.path(folder, "main_summary.csv"), row.names = FALSE)
+  write.csv(sensitivity, file.path(folder, "eta_summary.csv"), row.names = FALSE)
+  write.csv(do.call(rbind, diagnostics), file.path(folder, "did_diagnostics.csv"),
+            row.names = FALSE)
+
+  # Relative total length is descriptive; precision alone does not prove validity.
+  width <- reshape(main[, c("condition_id", "N", "tau", "eta_true", "method", "mean_length")],
+                   idvar = c("condition_id", "N", "tau", "eta_true"),
+                   timevar = "method", direction = "wide")
+  width$normal_to_df <- width[["mean_length.Normal"]] / width[["mean_length.Distribution-free"]]
+  width$normal_percent_shorter <- 100 * (1 - width$normal_to_df)
+  write.csv(width, file.path(folder, "length_comparison.csv"), row.names = FALSE)
+
+  # Population thresholds: below these multipliers the chosen bound is too small
+  # for the actual identification error in THIS smooth DGP.
+  thresholds <- data.frame(method = c("Normal", "Distribution-free"),
+    minimum_multiplier = c(abs(error_per_eta) / normal_factor, abs(error_per_eta) / 2))
+  write.csv(thresholds, file.path(folder, "eta_thresholds.csv"), row.names = FALSE)
+
+
+}
+
+# 5. PIAAC illustration: same estimators, simpler implementation ----------------
+
+if (RUN_EMPIRICAL) {
+  folder <- file.path(OUTPUT_DIR, "empirical")
+  dir.create(folder, recursive = TRUE, showWarnings = FALSE)
+  # These are illustrative, unweighted model-based analyses. They do not account
+  # for the complex survey design. No design-based inference is claimed.
+  piaac <- read.csv(PIAAC_FILE, sep = ";", dec = ".",
+                    na.strings = c(".", ".n", ".v"), check.names = FALSE)
+  pv_names <- paste0("PVLIT", 1:10)
+  required <- c("AGEG10LFS", "E320004S", "E320003S", pv_names)
+  if (!all(required %in% names(piaac))) stop("Required PIAAC columns are missing.")
+  keep <- piaac$AGEG10LFS %in% c(2, 4) & !is.na(piaac$E320004S) & !is.na(piaac$E320003S)
+  dat <- piaac[keep, required]
+  dat$group <- as.integer(dat$AGEG10LFS == 4)
+  dat$y_test <- dat$E320004S
+  dat$y_anchor <- dat$E320003S
+  stopifnot(is.numeric(dat$y_test), is.numeric(dat$y_anchor),
+            all(dat$y_test %in% c(0, 1)), all(dat$y_anchor %in% c(0, 1)))
+  if (nrow(dat) != 536 || sum(dat$group == 0) != 285 || sum(dat$group == 1) != 251) {
+    warning("Analytic sample differs from the manuscript; inspect the input data.")
+  }
+
+  # Analyze each plausible value separately, then use MI combining rules.
+  pv_results <- data.frame(PV = pv_names, n = 0, estimate = 0, variance = 0,
+                           mu = 0, variance_ratio = 0, warning = "", stringsAsFactors = FALSE)
+  for (i in seq_along(pv_names)) {
+    pv <- dat[[pv_names[i]]]
+    stopifnot(is.numeric(pv), !any(is.infinite(pv)))
+    use <- !is.na(pv)
+    group <- dat$group[use]
+    reference <- pv[use][group == 0]
+    focal <- pv[use][group == 1]
+    stopifnot(length(reference) >= 2, length(focal) >= 2, sd(reference) > 0)
+    matching <- (pv[use] - mean(reference)) / sd(reference)
+    logistic <- fit_logistic(dat$y_test[use], matching, group)
+    if (nzchar(logistic$reason)) stop(pv_names[i], ": ", logistic$reason)
+    pv_results$n[i] <- sum(use)
+    pv_results$estimate[i] <- logistic$estimate
+    pv_results$variance[i] <- logistic$se^2
+    pv_results$mu[i] <- (mean(focal) - mean(reference)) / sd(reference)
+    pv_results$variance_ratio[i] <- var(focal) / var(reference)
+    pv_results$warning[i] <- logistic$warning
+  }
+  m <- nrow(pv_results)
+  logistic_estimate <- mean(pv_results$estimate)
+  logistic_se <- sqrt(mean(pv_results$variance) + (1 + 1 / m) * var(pv_results$estimate))
+  did <- fit_did(dat$y_test, dat$y_anchor, dat$group)
+  estimates <- c(logistic_estimate, unname(did["estimate"]))
+  standard_errors <- c(logistic_se, unname(did["se"]))
+  empirical <- data.frame(method = c("Logistic-regression DIF", "DID"),
+    estimate = estimates, se = standard_errors,
+    lower = estimates - Z * standard_errors, upper = estimates + Z * standard_errors,
+    p = 2 * pnorm(abs(estimates / standard_errors), lower.tail = FALSE))
+
+  # Average the signed PV differences, then use their absolute value.
+  # This plug-in mu is a scenario input, not a value known without uncertainty.
+  mu_hat <- mean(pv_results$mu)
+  bounds <- c(0, EMPIRICAL_ETA * (4 * pnorm(abs(mu_hat) / 2) - 2), 2 * EMPIRICAL_ETA)
+  empirical_sensitivity <- data.frame(
+    method = c("Unadjusted", "Normal", "Distribution-free"), eta = EMPIRICAL_ETA,
+    mu = c(NA, mu_hat, NA), bound = bounds,
+    lower = unname(did["estimate"] - Z * did["se"]) - bounds,
+    upper = unname(did["estimate"] + Z * did["se"]) + bounds)
+  write.csv(empirical, file.path(folder, "empirical_results.csv"), row.names = FALSE)
+  write.csv(empirical_sensitivity, file.path(folder, "sensitivity.csv"), row.names = FALSE)
+  write.csv(pv_results, file.path(folder, "pv_results.csv"), row.names = FALSE)
+  writeLines(c(paste("Input:", normalizePath(PIAAC_FILE)),
+               paste("MD5:", unname(tools::md5sum(PIAAC_FILE))),
+               paste("N:", nrow(dat)), paste("Reference:", sum(dat$group == 0)),
+               paste("Focal:", sum(dat$group == 1)),
+               "Unweighted; survey-design uncertainty not included.",
+               "Sensitivity inputs treated as fixed; calibration uncertainty not included."),
+             file.path(folder, "analysis_notes.txt"))
+  print(empirical, row.names = FALSE)
+  print(empirical_sensitivity, row.names = FALSE)
+}
+
+# 6. Figures: shared layout and typography ------------------------------------
+
+DEVICE_WIDTH <- 9.4
+DEVICE_HEIGHT <- 8.85
+DEVICE_POINTSIZE <- 12
+stopifnot(length(FINAL_FIGURE_WIDTH_MM) == 1L,
+          is.finite(FINAL_FIGURE_WIDTH_MM), FINAL_FIGURE_WIDTH_MM > 0)
+FIGURE_SCALE <- FINAL_FIGURE_WIDTH_MM / (25.4 * DEVICE_WIDTH)
+
+# Target main-text sizes AFTER insertion into the manuscript (points).
+# Small mathematical subscripts retain their normal relative size.
+TEXT_PT <- c(tick = 9, legend = 9, title = 9.5, panel = 10.5, x = 10, y = 10)
+TEXT_CEX <- TEXT_PT / (DEVICE_POINTSIZE * FIGURE_SCALE)
+
+# PDF/Quartz/Cairo use nominal 0.75-point units for R's lwd.
+# Convert target line widths at final size to source-device lwd values.
+LINE_PT <- c(grid = .35, reference = .45, secondary = .8, primary = 1,
+             marker = .6, axis = .5)
+LINE_LWD <- LINE_PT / (.75 * FIGURE_SCALE)
+POINT_CEX <- 1.1
+
+METHODS <- c("Unadjusted", "Normal", "Distribution-free")
+COLORS <- c("grey45", "black", "grey30")
+LINES <- c(2, 1, 4)
+POINTS <- c(21, 21, 24)
+FILLS <- c("white", "black", "white")
+WIDTHS <- unname(LINE_LWD[c("secondary", "primary", "secondary")])
+
+# Keep the original device dimensions and base point size.
+# Adjust text with TEXT_CEX so enlarging lettering does not enlarge the margins.
+# Arial must be installed; font substitution is controlled by the graphics device.
+open_figure <- function(path) {
+  if (identical(Sys.info()[["sysname"]], "Darwin") && isTRUE(capabilities("aqua"))) {
+    grDevices::quartz(type = "pdf", file = path, width = DEVICE_WIDTH, height = DEVICE_HEIGHT,
+                     family = FIGURE_FONT, pointsize = DEVICE_POINTSIZE)
+  } else if (isTRUE(capabilities("cairo"))) {
+    grDevices::cairo_pdf(path, width = DEVICE_WIDTH, height = DEVICE_HEIGHT,
+                        family = FIGURE_FONT, pointsize = DEVICE_POINTSIZE, onefile = TRUE)
+  } else {
+    stop("PDF output requires native macOS Quartz or Cairo support in R.")
+  }
+}
+
+# Original Figure 4: heading -> three panels -> x-axis title -> legend, twice.
+figure4_layout <- function() {
+  par(oma = c(.4, 4.8, .4, .3), family = FIGURE_FONT,
+      ps = DEVICE_POINTSIZE, lwd = LINE_LWD["axis"])
+  layout(rbind(c(1, 1, 1), c(2, 3, 4), c(5, 5, 5), c(6, 6, 6),
+               c(0, 0, 0),
+               c(7, 7, 7), c(8, 9, 10), c(11, 11, 11), c(12, 12, 12)),
+         heights = c(.32, 2.3, .24, .48, .10, .32, 2.3, .24, .48))
+}
+
+blank_strip <- function() {
+  par(mar = c(0, 0, 0, 0), cex = 1, xaxs = "i", yaxs = "i")
+  plot.new()
+  plot.window(xlim = c(0, 1), ylim = c(0, 1), xaxs = "i", yaxs = "i")
+}
+
+# Figure 5: A = coverage; B = mean interval length.
+# Effect sizes and sensitivity specifications belong in the LaTeX captions.
+draw_interval_panels <- function(data, x_variable, x_label,
+                                 coverage_limits, length_limits) {
+  figure4_layout()
+  x_values <- sort(unique(data[[x_variable]]))
+  x_padding <- diff(range(x_values)) / 22
+  x_ticks <- x_values
+  x_tick_labels <- sprintf("%.2f", x_ticks)
+  x_tick_labels[x_ticks == 0] <- "0"
+  for (block in 1:2) {
+    blank_strip()
+    text(0, .5, if (block == 1) "A" else "B", adj = c(0, .5),
+         cex = TEXT_CEX["panel"], font = 2)
+    metric <- if (block == 1) "coverage" else "mean_length"
+    limits <- if (block == 1) coverage_limits else length_limits
+    ticks <- if (block == 1) {
+      seq(ceiling(limits[1] * 10) / 10, 1, by = .1)
+    } else {
+      pretty(c(0, limits[2]), n = 4)
+    }
+    ticks <- ticks[ticks >= limits[1] & ticks <= limits[2]]
+    labels <- sub("^0\\.", ".", sprintf("%.1f", ticks))
+    labels[ticks == 0] <- "0"
+    for (n in c(500, 1000, 2000)) {
+      panel <- data[data$N == n, ]
+      par(mar = c(2.3, 2.8, 2.5, .8), mgp = c(1.7, .5, 0),
+          tcl = -.2, las = 1, xaxs = "i", yaxs = "i", cex = 1)
+      plot(NA, xlim = range(x_values) + c(-1, 1) * x_padding,
+           ylim = limits, xlab = "", ylab = "", xaxt = "n", yaxt = "n", bty = "l")
+      abline(h = ticks[ticks > 0], col = "grey90", lwd = LINE_LWD["grid"])
+      if (block == 1) abline(h = .95, col = "grey60", lty = 3, lwd = LINE_LWD["reference"])
+      axis(1, at = x_ticks, labels = x_tick_labels, cex.axis = TEXT_CEX["tick"])
+      axis(2, at = ticks, labels = labels, cex.axis = TEXT_CEX["tick"])
+      mtext(bquote(italic(N) == .(format(n, big.mark = ",", trim = TRUE))),
+            side = 3, line = .8, cex = TEXT_CEX["title"], las = 1)
+      # Draw the black normal-bound curve last, as with DID in Figure 4.
+      for (j in c(1, 3, 2)) {
+        z <- panel[panel$method == METHODS[j], ]
+        z <- z[order(z[[x_variable]]), ]
+        if (nrow(z) != length(x_values) || anyDuplicated(z[[x_variable]]) ||
+            !isTRUE(all.equal(z[[x_variable]], x_values))) {
+          stop("Missing or duplicated conditions in an interval figure.")
+        }
+        lines(x_values, z[[metric]], col = COLORS[j], lty = LINES[j], lwd = WIDTHS[j])
+      }
+      for (j in c(1, 3, 2)) {
+        z <- panel[panel$method == METHODS[j], ]
+        z <- z[order(z[[x_variable]]), ]
+        points(x_values, z[[metric]], col = COLORS[j], pch = POINTS[j],
+               bg = FILLS[j], cex = POINT_CEX, lwd = LINE_LWD["marker"])
+      }
+    }
+    blank_strip()
+    text(.5, .5, x_label, cex = TEXT_CEX["x"])
+    blank_strip()
+    legend("center", c("Unadjusted", "Normal-distribution", "Distribution-free"),
+           horiz = TRUE, bty = "n", cex = TEXT_CEX["legend"], col = COLORS, lty = LINES,
+           lwd = WIDTHS, pch = POINTS, pt.bg = FILLS, pt.cex = POINT_CEX, seg.len = 1.5, x.intersp = .65)
+  }
+  mtext("Coverage", side = 2, outer = TRUE, line = 2.5,
+        las = 0, at = .78, cex = TEXT_CEX["y"])
+  mtext("Mean interval length", side = 2, outer = TRUE, line = 2.5,
+        las = 0, at = .27, cex = TEXT_CEX["y"])
+}
+
+# Study 1: keep the existing two-block, three-column rejection-rate design.
+folder <- file.path(OUTPUT_DIR, "study1")
+if (MAKE_FIGURES && RUN_STUDY1) {
+  did <- read.csv(file.path(folder, "did_summary.csv"))
+  logistic <- read.csv(file.path(folder, "logistic_summary.csv"))
+  taus <- c(0, -.05, -.10)
+  open_figure(file.path(folder, "figure4.pdf"))
+  figure4_layout()
+  colors <- c("black", "grey35", "grey45", "grey55")
+  line_types <- c(1, 2, 4, 5)
+  symbols <- c(21, 21, 24, 22)
+  widths <- unname(LINE_LWD[c("primary", "secondary", "secondary", "secondary")])
+  for (block in 1:2) {
+    blank_strip()
+    text(0, .5, if (block == 1) "A" else "B", adj = c(0, .5), cex = TEXT_CEX["panel"], font = 2)
+    for (n in c(500, 1000, 2000)) {
+      par(mar = c(2.3, 2.8, 2.5, .8), mgp = c(1.7, .5, 0), tcl = -.2,
+          las = 1, xaxs = "i", yaxs = "i", cex = 1)
+      plot(NA, xlim = c(.005, -.105), ylim = c(-.025, 1.025),
+           xlab = "", ylab = "", xaxt = "n", yaxt = "n", bty = "l")
+      abline(h = c(.25, .5, .75, 1), col = "grey90", lwd = LINE_LWD["grid"])
+      abline(h = .05, col = "grey60", lty = 3, lwd = LINE_LWD["reference"])
+      axis(1, at = taus, labels = c("0", "-0.05", "-0.10"), cex.axis = TEXT_CEX["tick"])
+      axis(2, at = seq(0, 1, .2), labels = c("0", ".2", ".4", ".6", ".8", "1.0"), cex.axis = TEXT_CEX["tick"])
+      mtext(bquote(italic(N) == .(format(n, big.mark = ",", trim = TRUE))),
+            side = 3, line = .8, cex = TEXT_CEX["title"], las = 1)
+      z <- did[did$N == n, ]
+      series <- list(z$rejection[match(taus, z$tau)])
+      for (k in 1:3) {
+        delta <- if (block == 1) c(0, .25, .5)[k] else 0
+        rho <- if (block == 1) 1 else c(1, .8, .6)[k]
+        z <- logistic[logistic$N == n & logistic$delta == delta & logistic$rho == rho, ]
+        series[[k + 1]] <- z$rejection[match(taus, z$tau)]
+      }
+      for (j in c(2, 3, 4, 1)) {
+        lines(taus, series[[j]], col = colors[j], lty = line_types[j], lwd = widths[j])
+      }
+      for (j in c(2, 3, 4, 1)) {
+        points(taus, series[[j]], col = colors[j], pch = symbols[j],
+               bg = if (j == 1) "black" else "white", cex = POINT_CEX, lwd = LINE_LWD["marker"])
+      }
+    }
+    blank_strip()
+    text(.5, .5, expression(tau), cex = TEXT_CEX["x"])
+    blank_strip()
+    labels <- if (block == 1) {
+      expression(DID, paste("Logistic: ", delta == 0),
+                 paste("Logistic: ", delta == .25), paste("Logistic: ", delta == .50))
+    } else {
+      expression(DID, paste("Logistic: ", rho == 1.00),
+                 paste("Logistic: ", rho == .80), paste("Logistic: ", rho == .60))
+    }
+    legend("center", labels, horiz = TRUE, bty = "n", cex = TEXT_CEX["legend"],
+           col = colors, lty = line_types, lwd = widths, pch = symbols,
+           pt.bg = c("black", rep("white", 3)), pt.cex = POINT_CEX,
+           seg.len = 1.5, x.intersp = .65)
+  }
+  mtext("Rejection rate", side = 2, outer = TRUE, line = 2.5,
+        las = 0, at = .55, cex = TEXT_CEX["y"])
+  dev.off()
+
+
+}
+
+# Study 2: show one nonzero effect in the main text; do not pool over tau.
+folder <- file.path(OUTPUT_DIR, "study2")
+if (MAKE_FIGURES && RUN_STUDY2) {
+  main <- read.csv(file.path(folder, "main_summary.csv"))
+  sensitivity <- read.csv(file.path(folder, "eta_summary.csv"))
+  # Use common limits across all effect sizes; keep .95 and 1 clearly visible.
+  coverage_limits <- c(max(0, floor((min(main$coverage) - .02) * 10) / 10), 1.01)
+  length_limits <- c(0, max(main$mean_length) * 1.05)
+  open_figure(file.path(folder, "figure5.pdf"))
+  draw_interval_panels(main[main$tau == -.05, ], "eta_true", expression(eta[0]),
+                       coverage_limits, length_limits)
+  dev.off()
+
+}
+
+# 7. Supplementary tables: manuscript-ready LaTeX ------------------------------
+# These use the manuscript's CUP macros (TBL, TCH, fntable, and botrule).
+# Table numbers are assigned by LaTeX; the files do not reset its counters.
+
+# Consistent decimal display, including -.10 rather than -0.10.
+fmt <- function(x, digits = 3L) {
+  x <- round(x, digits)
+  x[x == 0 & !is.na(x)] <- 0
+  out <- sprintf(paste0("%.", digits, "f"), x)
+  out <- sub("^(-?)0\\.", "\\1.", out)
+  out[is.na(x)] <- "---"
+  out
+}
+
+# One writer handles the shared table structure; each table below supplies
+# its own headers, rows, and note. No statistical calculations occur here.
+write_table <- function(data, headers, caption, label, note, path, breaks = integer(0)) {
+  body <- character(0)
+  for (i in seq_len(nrow(data))) {
+    if (i %in% breaks) body <- c(body, "\\addlinespace")
+    body <- c(body, paste0(paste(as.character(unlist(data[i, ], use.names = FALSE)),
+                                collapse = " & "), " \\\\"))
+  }
+  writeLines(c("\\begin{table}[!htbp]", "\\tabcolsep=0pt",
+    paste0("\\TBL{\\caption{", caption, "\\label{", label, "}}}"),
+    "{\\begin{fntable}",
+    paste0("\\begin{tabular*}{\\textwidth}{@{\\extracolsep{\\fill}}",
+           paste(rep("r", ncol(data)), collapse = ""), "@{}}"),
+    "\\toprule", headers, "\\midrule", body, "\\botrule", "\\end{tabular*}",
+    paste0("\\footnotetext[]{\\textit{Note:} ", note, "}"),
+    "\\end{fntable}}", "\\end{table}"), path)
+}
+
+# S1: DID performance pooled over the nine matching-variable conditions.
+if (RUN_STUDY1) {
+  folder <- file.path(OUTPUT_DIR, "study1")
+  d <- did_summary[order(did_summary$N, -did_summary$tau), ]
+  tab <- data.frame(N = format(d$N, big.mark = ",", trim = TRUE),
+    tau = fmt(d$tau, 2), bias = fmt(d$bias, 4), RMSE = fmt(d$rmse),
+    SE_SD = fmt(d$se_sd_ratio), coverage = fmt(d$coverage, 4),
+    rejection = fmt(d$rejection, 4))
+  tab$N[duplicated(d$N)] <- ""
+  pooled <- unique(d$n_total)
+  stopifnot(length(pooled) == 1L)
+  note <- paste0(
+    "$N$ = sample size; $\\tau$ = true average item-bias effect. ",
+    "RMSE = root-mean-square error. Bias and RMSE are relative to $\\tau$. ",
+    "SE/SD is the ratio of the mean estimated standard error to the empirical ",
+    "standard deviation of the pooled estimates. Coverage is the proportion ",
+    "of nominal 95\\% confidence intervals containing $\\tau$. ",
+    "Rejection is the proportion of replications in which the two-sided test ",
+    "rejects at the .05 level, representing the Type~I error rate at ",
+    "$\\tau=0$ and power otherwise. Each row pools ",
+    format(pooled, big.mark = ",", trim = TRUE),
+    " replications across the nine matching-variable conditions, which affect ",
+    "neither the DID estimator nor the distribution of its inputs.")
+  write_table(tab,
+    "$N$ & $\\tau$ & Bias & RMSE & SE/SD & Coverage & Rejection \\\\",
+    "DID Performance in Study~1", "tab:sim1_did", note,
+    file.path(folder, "table_S1_did.tex"), breaks = c(4L, 7L))
+
+  # S2: the full crossed logistic-regression DIF design.
+  keys <- expand.grid(delta = c(0, .25, .50), N = N_VALUES)
+  tab <- data.frame(N = format(keys$N, big.mark = ",", trim = TRUE),
+                    delta = fmt(keys$delta, 2))
+  tab$N[duplicated(keys$N)] <- ""
+  for (tau in TAU_VALUES) for (rho in c(1, .8, .6)) {
+    z <- logistic_summary[logistic_summary$tau == tau & logistic_summary$rho == rho, ]
+    index <- match(paste(keys$N, keys$delta), paste(z$N, z$delta))
+    stopifnot(!anyNA(index))
+    tab[[paste0("rate", ncol(tab))]] <- fmt(z$rejection[index])
+  }
+  repetitions <- unique(logistic_summary$n_total)
+  stopifnot(length(repetitions) == 1L)
+  note <- paste0(
+    "$N$ = sample size; $\\delta$ = direct group effect on the matching variable; ",
+    "$\\rho$ = matching-variable reliability; ",
+    "$\\tau$ = true average item-bias effect. ",
+    "Each cell reports the proportion of valid replications in which the ",
+    "two-sided test rejects at the .05 level, representing the Type~I error ",
+    "rate at $\\tau=0$ and power otherwise. Each condition uses ",
+    format(repetitions, big.mark = ",", trim = TRUE), " simulated samples.")
+  if (any(logistic_summary$n_failed > 0)) {
+    note <- paste0(note, " Failed fits are excluded; valid counts range from ",
+      min(logistic_summary$n_valid), " to ", max(logistic_summary$n_valid), ".")
+  }
+  write_table(tab, c(
+    " & & \\multicolumn{3}{c}{$\\tau=0$} & \\multicolumn{3}{c}{$\\tau=-.05$} & \\multicolumn{3}{c}{$\\tau=-.10$} \\\\",
+    "\\cmidrule(lr){3-5}\\cmidrule(lr){6-8}\\cmidrule(lr){9-11}",
+    "$N$ & $\\delta$ & \\multicolumn{3}{c}{$\\rho$} & \\multicolumn{3}{c}{$\\rho$} & \\multicolumn{3}{c}{$\\rho$} \\\\",
+    " & & 1.00 & .80 & .60 & 1.00 & .80 & .60 & 1.00 & .80 & .60 \\\\") ,
+    "Rejection Rates for Logistic-Regression DIF in Study~1", "tab:sim1_logistic",
+    note, file.path(folder, "table_S2_logistic.tex"), breaks = c(4L, 7L))
+}
+
+if (RUN_STUDY2) {
+  folder <- file.path(OUTPUT_DIR, "study2")
+  interval_note <- paste0(
+    "Unadjusted denotes the nominal 95\\% DID confidence interval; ",
+    "normal-distribution and distribution-free denote the intervals based ",
+    "on the corresponding sensitivity bounds. Coverage is the proportion ",
+    "of intervals containing $\\tau$; length is mean interval length. ")
+  repetitions <- unique(main$n_total)
+  stopifnot(length(repetitions) == 1L)
+  repetitions <- format(repetitions, big.mark = ",", trim = TRUE)
+
+  # S3: additional effect sizes, with eta = eta_0.
+  keys <- expand.grid(eta_true = ETA_TRUE_VALUES, N = N_VALUES, tau = c(0, -.10))
+  tab <- data.frame(tau = fmt(keys$tau, 2),
+    N = format(keys$N, big.mark = ",", trim = TRUE), eta = fmt(keys$eta_true, 2))
+  groups <- paste(keys$tau, keys$N)
+  tab$tau[duplicated(groups)] <- ""
+  tab$N[duplicated(groups)] <- ""
+  for (method in METHODS) {
+    z <- main[main$method == method, ]
+    index <- match(paste(keys$tau, keys$N, keys$eta_true),
+                   paste(z$tau, z$N, z$eta_true))
+    stopifnot(!anyNA(index))
+    tab[[paste0("coverage", ncol(tab))]] <- fmt(z$coverage[index], 4)
+    tab[[paste0("length", ncol(tab))]] <- fmt(z$mean_length[index])
   }
   note <- paste0(
-    count_note, " across nine matching-variable conditions, which affect neither ",
-    "the DID estimator nor the distribution of its inputs. ",
-    "Bias and RMSE are relative to $\\tau$. SE/SD is the ratio of the mean ",
-    "estimated standard error to the empirical standard deviation of the pooled estimates. ",
-    "Coverage refers to nominal 95\\% confidence intervals for $\\tau$. ",
-    "Rejection denotes Type~I error when $\\tau=0$ and power when $\\tau\\neq0$, ",
-    "at the two-sided .05 level.")
-  writeLines(c(lines, finish(note)), file.path(directory, "table_study1_did.tex"))
+    "$\\tau$ = true average item-bias effect; $N$ = sample size; ",
+    "$\\eta_0$ = supremum of the absolute difference between the test- and ",
+    "anchor-item IRFs under the reference-group condition. ",
+    "$\\eta$ is the specified sensitivity parameter; $\\mu$ is the standardized ",
+    "latent mean difference between the focal and reference groups. ",
+    interval_note, "Each condition is based on ", repetitions,
+    " replications, with $\\eta=\\eta_0$ and $\\mu=-.5$.")
+  write_table(tab, c(
+    " & & & \\multicolumn{2}{c}{Unadjusted} & \\multicolumn{2}{c}{Normal-distribution} & \\multicolumn{2}{c}{Distribution-free} \\\\",
+    "\\cmidrule(lr){4-5}\\cmidrule(lr){6-7}\\cmidrule(lr){8-9}",
+    "$\\tau$ & $N$ & $\\eta_0$ & Coverage & Length & Coverage & Length & Coverage & Length \\\\") ,
+    "Interval Performance at Additional Effect Sizes in Study~2",
+    "tab:sim2_other_effects", note, file.path(folder, "table_S3_other_effects.tex"),
+    breaks = seq(5L, 21L, by = 4L))
 
-  lines <- start("Rejection Rates for Logistic-Regression DIF in Study~1",
-                 "tab:sim1_logistic", "rrccccccccc")
-  lines <- c(lines, row(c("", "", "\\multicolumn{3}{c}{$\\tau=0$}",
-          "\\multicolumn{3}{c}{$\\tau=-.05$}", "\\multicolumn{3}{c}{$\\tau=-.10$}")),
-    "\\cmidrule(lr){3-5}\\cmidrule(lr){6-8}\\cmidrule(lr){9-11}",
-    row(c("\\TCH{$N$}", "\\TCH{$\\delta$}", rep("\\multicolumn{3}{c}{$\\rho$}", 3))),
-    row(c("", "", rep(c("1.00", ".80", ".60"), 3))), "\\midrule")
-  for (n in c(500, 1000, 2000)) {
-    if (n != 500) lines <- c(lines, "\\addlinespace")
-    for (delta in c(0, .25, .50)) {
-      values <- numeric(0)
-      for (tau in c(0, -.05, -.10)) {
-        for (rho in c(1, .8, .6)) {
-          d <- logistic[logistic$N == n & logistic$delta == delta & 
-                          logistic$tau == tau & logistic$rho == rho, ]
-          if (nrow(d) != 1L) stop("Missing or duplicated logistic table condition.")
-          values <- c(values, d$rejection)
-        }
-      }
-      lines <- c(lines, row(c(
-        if (delta == 0) sample_label(n) else "", decimal(delta, 2), decimal(values))))
-    }
+  # S4: eta choices applied to the same draws at tau = -.05 and eta_0 = .15.
+  keys <- expand.grid(eta_multiplier = ETA_MULTIPLIERS, N = N_VALUES)
+  tab <- data.frame(N = format(keys$N, big.mark = ",", trim = TRUE),
+                    ratio = fmt(keys$eta_multiplier, 2))
+  tab$N[duplicated(keys$N)] <- ""
+  for (method in METHODS) {
+    z <- sensitivity[sensitivity$tau == -.05 & sensitivity$eta_true == .15 &
+                       sensitivity$method == method, ]
+    index <- match(paste(keys$N, keys$eta_multiplier), paste(z$N, z$eta_multiplier))
+    stopifnot(!anyNA(index))
+    tab[[paste0("coverage", ncol(tab))]] <- fmt(z$coverage[index], 4)
+    tab[[paste0("length", ncol(tab))]] <- fmt(z$mean_length[index])
   }
-  counts <- unique(logistic$n_valid)
-  note <- if (length(counts) == 1L) {
-    paste0("Each cell is based on ", sample_label(counts), " valid replications. ")
-  } else {
-    "Rejection rates use valid fits as denominators; counts are provided in the CSV. "
-  }
-  note <- paste0(note, "Rejection denotes Type~I error when $\\tau=0$ and power ",
-                 "when $\\tau\\neq0$, at the two-sided .05 level.")
-  writeLines(c(lines, finish(note)), file.path(directory, "table_study1_logistic.tex"))
+  note <- paste0(
+    "$N$ = sample size; $\\eta/\\eta_0$ = ratio of the specified sensitivity ",
+    "parameter to the supremum of the absolute difference between the test- ",
+    "and anchor-item IRFs under the reference-group condition. ",
+    "$\\tau$ is the true average item-bias effect; $\\mu$ is the standardized ",
+    "latent mean difference between the focal and reference groups. ",
+    interval_note, "For each $N$, the same ", repetitions,
+    " simulated samples were used across values of $\\eta$, with ",
+    "$\\tau=-.05$, $\\eta_0=.15$, and $\\mu=-.5$. ",
+    "The unadjusted interval does not depend on $\\eta$.")
+  write_table(tab, c(
+    " & & \\multicolumn{2}{c}{Unadjusted} & \\multicolumn{2}{c}{Normal-distribution} & \\multicolumn{2}{c}{Distribution-free} \\\\",
+    "\\cmidrule(lr){3-4}\\cmidrule(lr){5-6}\\cmidrule(lr){7-8}",
+    "$N$ & $\\eta/\\eta_0$ & Coverage & Length & Coverage & Length & Coverage & Length \\\\") ,
+    "Sensitivity to the Specified Value of $\\eta$ in Study~2",
+    "tab:sim2_eta_choice", note, file.path(folder, "table_S4_eta_choice.tex"),
+    breaks = c(8L, 15L))
 }
 
-outputs_study1 <- function(directory) {
-  input_file <- file.path(directory, "simulation.rds")
-
-  if (!file.exists(input_file)) {
-    stop("No saved Study 1 simulation. Run mode 'simulations' first.")
+# 8. Numerical checks and run record ------------------------------------------
+# Check key identities on the actual results, without generating new datasets.
+if (RUN_STUDY2) {
+  for (i in unique(main$condition_id)) {
+    x <- main[main$condition_id == i, ]
+    x <- x[match(METHODS, x$method), ]
+    stopifnot(all(diff(x$coverage) >= 0),
+              max(abs(x$mean_length - x$mean_length[1] - 2 * x$bound)) < 1e-10)
   }
-
-  simulation <- readRDS(input_file)
-
-  required_raw <- c("condition_id", "did", "did_se", "logistic", "logistic_se",
-    "logistic_valid", "logistic_failed", "logistic_warning", "logistic_warning_count")
-
-  required_design <- c("condition_id", "N", "tau", "delta", "rho_M", "gamma")
-
-  if (!all(required_raw %in% names(simulation$raw)) || 
-      !all(required_design %in% names(simulation$design))) {
-    stop("Saved Study 1 data have a different schema. ",
-      "Use saved results from the current simulation design.")
+  for (i in seq_len(nrow(design2))) {
+    d <- design2[i, ]
+    anchor <- function(theta) d$eta_true + (1 - 2 * d$eta_true) * plogis(1.5 * theta)
+    population <- normal_mean(function(theta) plogis(1.5 * theta + d$gamma) - anchor(theta)) -
+      normal_mean(function(theta) plogis(1.5 * theta) - anchor(theta), mu = 0)
+    stopifnot(abs(population - d$population_did) < 1e-8)
   }
-
-  results <- merge(simulation$raw, simulation$design, by = "condition_id", sort = FALSE)
-
-  alpha <- simulation$metadata$alpha
-  groups <- split(results, results$condition_id)
-
-  keys <- c("condition_id", "N", "tau", "delta", "rho_M", "gamma")
-
-  cat("Study 1 outputs use saved replications per condition: ",
-    simulation$metadata$replications, "\n", sep = "")
-
-  logistic_summary <- do.call(rbind, lapply(groups, function(d) {
-    valid <- d$logistic_valid & 
-      is.finite(d$logistic) & 
-      is.finite(d$logistic_se) & 
-      d$logistic_se > 0
-
-    n_valid <- sum(valid)
-    n_total <- nrow(d)
-
-    if (n_valid > 0L) {
-      critical <- qnorm(1 - alpha / 2)
-      lower <- d$logistic[valid] -
-        critical * d$logistic_se[valid]
-      upper <- d$logistic[valid] +
-        critical * d$logistic_se[valid]
-
-      rejection <- mean(lower > 0 | upper < 0)
-      negative <- mean(upper < 0)
-      positive <- mean(lower > 0)
-
-      mean_coefficient <- mean(d$logistic[valid])
-      coefficient_sd <- if (n_valid > 1L) {
-        sd(d$logistic[valid])
-      } else {
-        NA_real_
-      }
-
-      mean_se <- mean(d$logistic_se[valid])
-    } else {
-      rejection <- NA_real_
-      negative <- NA_real_
-      positive <- NA_real_
-      mean_coefficient <- NA_real_
-      coefficient_sd <- NA_real_
-      mean_se <- NA_real_
-    }
-
-    cbind(d[1, keys], data.frame(n_total = n_total, n_valid = n_valid,
-        n_failed = n_total - n_valid, n_reported_failures = sum(d$logistic_failed),
-        n_fits_with_warnings = sum(d$logistic_warning),
-        n_warnings = sum(d$logistic_warning_count), mean_coefficient = mean_coefficient,
-        coefficient_sd = coefficient_sd, mean_se = mean_se, rejection = rejection,
-        rejection_mcse = binomial_mcse(rejection, n_valid), excludes_zero_negative = negative,
-        excludes_zero_positive = positive, stringsAsFactors = FALSE))
-  }))
-
-  rownames(logistic_summary) <- NULL
-
-  # Pool raw DID replications, rather than averaging condition-level
-  # nonlinear statistics such as empirical SD or RMSE.
-  pooled_keys <- unique(results[, c("N", "tau")])
-  pooled_keys <- pooled_keys[ order(pooled_keys$N, -pooled_keys$tau), , drop = FALSE ]
-
-  did_pooled <- do.call(rbind,
-    lapply(seq_len(nrow(pooled_keys)), function(i) {
-      current_N <- pooled_keys$N[i]
-      current_tau <- pooled_keys$tau[i]
-
-      d <- results[ results$N == current_N & results$tau == current_tau, , drop = FALSE ]
-
-      cbind(pooled_keys[i, , drop = FALSE], data.frame(
-          n_conditions_pooled = length(unique(d$condition_id))), performance(
-          estimates = d$did, standard_errors = d$did_se, truth = current_tau, alpha = alpha)
-)
-    })
-)
-
-  rownames(did_pooled) <- NULL
-
-  figure_data <- logistic_summary
-  key <- function(N, tau) paste(N, sprintf("%.4f", tau), sep = ":")
-  idx <- match(key(figure_data$N, figure_data$tau), key(did_pooled$N, did_pooled$tau))
-  stopifnot(!anyNA(idx))
-  figure_data$did_rejection <- did_pooled$rejection[idx]
-  figure_data$did_rejection_mcse <- did_pooled$rejection_mcse[idx]
-  figure_data$metric <- ifelse(figure_data$tau == 0, "Type I error", "Power")
-
-  did_table <- did_pooled[, c(
-    "N", "tau", "bias", "rmse", "se_sd_ratio", "coverage", "rejection", "n_valid")]
-  logistic_table <- logistic_summary[, c(
-    "N", "tau", "delta", "rho_M", "rejection", "n_valid", "n_failed", "n_fits_with_warnings"
-)]
-  names(logistic_table)[names(logistic_table) == "rho_M"] <- "rho"
-  logistic_table <- logistic_table[order(
-    logistic_table$N, logistic_table$delta, -logistic_table$tau, -logistic_table$rho), ]
-  write_csv(did_table, file.path(directory, "table_study1_did.csv"))
-  write_csv(logistic_table, file.path(directory, "table_study1_logistic.csv"))
-  write_appendix_tables(did_table, logistic_table, directory)
-  write_csv(figure_data, file.path(directory, "figure4_data.csv"))
-  plot_rejection_grid(figure_data, directory, study = 1L, alpha = alpha)
-  message("Study 1: Figure 4 and Tables S1-S2 saved in ", directory)
-  invisible(list(did = did_table, logistic = logistic_table))
 }
 
-outputs_study2 <- function(directory) {
-  input <- file.path(directory, "simulation.rds")
-  if (!file.exists(input)) stop("No saved Study 2 results. Run mode 'simulations' first.")
-  simulation <- readRDS(input)
-  # Confirm that the saved results use the Study 2 IRFs.
-  expected_irfs <- list(
-    test_reference_irf = "plogis(1.5 * theta)",
-    test_focal_irf = "plogis(1.5 * theta + gamma)",
-    anchor_irf = "eta + (1 - 2 * eta) * plogis(1.5 * theta)"
-  )
-  if (!identical(simulation$metadata[names(expected_irfs)], expected_irfs)) {
-    stop("Saved Study 2 results do not match the specified IRFs. Run the simulations first.")
-  }
-  keys <- c("condition_id", "N", "tau", "eta_true", "b_normal", "b_df")
-  if (!all(keys %in% names(simulation$design)) || 
-      !all(c("condition_id", "did", "did_se") %in% names(simulation$raw)) || 
-      anyDuplicated(simulation$design$condition_id) || 
-      !all(simulation$raw$condition_id %in% simulation$design$condition_id)) {
-    stop("Invalid saved Study 2 data.")
-  }
-  results <- merge(simulation$raw, simulation$design, by = "condition_id", sort = FALSE)
-  groups <- split(results, results$condition_id)
-  if (length(groups) != 36L || 
-      any(vapply(groups, nrow, integer(1)) != simulation$metadata$replications) || 
-      any(!is.finite(results$did)) || any(!is.finite(results$did_se)) || 
-      any(results$did_se < 0)) stop("Incomplete or invalid Study 2 replications.")
-  alpha <- simulation$metadata$alpha
-  figure_data <- do.call(rbind, lapply(groups, function(d) {
-    s <- sensitivity_summary(d$did, d$did_se, d$tau[1], d$b_normal[1], d$b_df[1], alpha)
-    data.frame(condition_id = d$condition_id[1], N = d$N[1], tau = d$tau[1],
-      eta_true = d$eta_true[1], method = s$method, bound = s$bound,
-      n_valid = s$n_valid, rejection = s$excludes_zero, rejection_mcse = s$excludes_zero_mcse,
-      metric = if (d$tau[1] == 0) "Type I error" else "Power")
-  }))
-  rownames(figure_data) <- NULL
-  stopifnot(nrow(figure_data) == 108L)
-  for (id in unique(figure_data$condition_id)) {
-    d <- figure_data[figure_data$condition_id == id, ]
-    stopifnot(all(diff(d$rejection) <= 1e-12))
-    if (d$eta_true[1] == 0) stopifnot(length(unique(d$rejection)) == 1L)
-  }
-  write_csv(figure_data, file.path(directory, "figure5_data.csv"))
-  plot_rejection_grid(figure_data, directory, study = 2L, alpha = alpha)
-  message("Study 2: Figure 5 saved in ", directory)
-  invisible(figure_data)
-}
-
-# 7. Numerical implementation checks --------------------------------------
-
-check_implementation <- function() {
-  # Deterministic sample: these checks do not draw from the simulation RNG.
-  group <- rep(c(0L, 1L), c(43L, 57L))
-  y_anchor <- rep(c(0, 1, 1, 0, 1), 20)
-  y_test <- rep(c(1, 0, 1, 1), 25)
-  difference <- y_test - y_anchor
-
-  fast <- fit_did_hc3(y_test, y_anchor, group)
-
-  fit <- lm(difference ~ group)
-  X <- model.matrix(fit)
-  bread <- solve(crossprod(X))
-  adjusted_residual <- residuals(fit) / (1 - hatvalues(fit))
-
-  meat <- crossprod(X, X * as.numeric(adjusted_residual^2))
-
-  v <- bread %*% meat %*% bread
-
-  stopifnot(abs(fast["estimate"] - coef(fit)["group"]) < 1e-12,
-    abs(fast["se"] - sqrt(v["group", "group"])) < 1e-12)
-
-  grid <- seq(-30, 30, length.out = 100001L)
-
-  for (eta in c(0, .05, .10, .15)) {
-    parameter <- calibrate_parameter(eta, "Smooth")
-
-    grid_max <- max(abs(reference_irf(grid, "Smooth", parameter) -
-        comparison_anchor_irf(grid, "Smooth", parameter)))
-
-    B <- identification_error(violation = "Smooth", parameter = parameter)
-
-    stopifnot(abs(parameter - eta) < 1e-12,
-      max(abs(reference_irf(grid, "Smooth", parameter) - plogis(1.5 * grid))) < 1e-12,
-      max(abs(comparison_anchor_irf(grid, "Smooth", parameter) -
-                (eta + (1 - 2 * eta) * plogis(1.5 * grid)))) < 1e-12,
-      abs(grid_max - eta) < 1e-6, B <= 1e-12, abs(B + eta * 0.259964188188494) < 1e-8,
-      abs(B) <= normal_bound(eta, -.5) + 1e-9, abs(B) <= distribution_free_bound(eta) + 1e-9,
-      abs(identification_error(violation = "Smooth", parameter = parameter, mu = 0)) < 1e-10
-)
-
-    for (tau in c(0, -.05, -.10)) {
-      gamma <- calibrate_gamma(tau = tau, violation = "Smooth", parameter = parameter)
-
-      stopifnot(abs(gamma - calibrate_gamma(tau, "Difficulty", 0)) < 1e-10, abs(
-          tau_from_gamma(gamma = gamma, violation = "Smooth", parameter = parameter) - tau
-) < 1e-8, abs(population_did(gamma = gamma, violation = "Smooth",
-            parameter = parameter) - tau - B) < 1e-8)
-    }
-  }
-
-  stopifnot(normal_bound(.15, 0) == 0)
-
-  for (mu in c(-1, -.5, .5, 1)) {
-    l1 <- integrate(
-      function(theta) {
-        abs(dnorm(theta, mean = mu, sd = 1) - dnorm(theta, mean = 0, sd = 1))
-      },
-      lower = -Inf, upper = Inf, subdivisions = 1000L, rel.tol = 1e-8)$value
-
-    stopifnot(abs(l1 - (4 * pnorm(abs(mu) / 2) - 2)) < 1e-7)
-  }
-
-  estimates <- seq(-.15, .10, length.out = 100)
-  standard_errors <- rep(.04, 100)
-
-  intervals <- sensitivity_summary(estimates = estimates, standard_errors = standard_errors,
-    tau = 0, b_normal = normal_bound(.10, -.5), b_df = .20)
-
-  stopifnot(all(diff(intervals$coverage_tau) >= 0), all(diff(intervals$excludes_zero) <= 0),
-    all(diff(intervals$mean_width) >= 0), max(abs(intervals$mean_width -
-        intervals$mean_width[1] - 2 * intervals$bound)) < 1e-12)
-
-  # Replication-level nesting and exact width expansion.
-  critical <- qnorm(.975)
-  lower <- estimates - critical * standard_errors
-  upper <- estimates + critical * standard_errors
-
-  bounds <- c(0, normal_bound(.10, -.5), .20)
-
-  for (bound in bounds) {
-    adjusted_lower <- lower - bound
-    adjusted_upper <- upper + bound
-
-    stopifnot(all(adjusted_lower <= lower), all(adjusted_upper >= upper), max(abs(
-        (adjusted_upper - adjusted_lower) - (upper - lower) - 2 * bound)) < 1e-12)
-  }
-
-  # Zero sensitivity bounds reproduce the unadjusted interval.
-  zero_bound_intervals <- sensitivity_summary(estimates = estimates,
-    standard_errors = standard_errors, tau = 0, b_normal = 0, b_df = 0)
-
-  stopifnot(max(abs(zero_bound_intervals$coverage_tau - zero_bound_intervals$coverage_tau[1]
-)) < 1e-12, max(abs(zero_bound_intervals$mean_width - zero_bound_intervals$mean_width[1]
-)) < 1e-12, max(abs(zero_bound_intervals$excludes_zero -
-        zero_bound_intervals$excludes_zero[1])) < 1e-12)
-
-  cat("Numerical implementation checks passed.\n")
-  invisible(NULL)
-}
-
-# 8. PIAAC empirical illustration (optional) ------------------------------
-
-check_empirical_inputs <- function(data_file) {
-  # Check prerequisites before starting any potentially lengthy simulations.
-  packages <- c("dplyr", "sandwich")
-  missing_packages <- packages[!vapply(packages, requireNamespace, logical(1), quietly = TRUE
-)]
-
-  if (length(missing_packages) > 0L) {
-    stop("Install the required empirical-analysis packages: ",
-      paste(missing_packages, collapse = ", "), ".")
-  }
-
-  if (!file.exists(data_file)) {
-    stop("PIAAC CSV not found: ", data_file,
-      ". Set EMPIRICAL_DATA_FILE to the local Korean public-use CSV, ",
-      "or choose RUN_MODE <- \"simulations\" to run without PIAAC data.")
-  }
-  invisible(NULL)
-}
-
-run_empirical_illustration <- function(data_file, directory, eta, alpha) {
-  # All analyses are unweighted. Confidence intervals and p-values use
-  # large-sample normal inference. Sensitivity parameters are treated as fixed.
-  stopifnot(length(eta) == 1L, is.finite(eta), eta >= 0, eta <= 1,
-    length(alpha) == 1L, is.finite(alpha), alpha > 0, alpha < 1)
-
-  # G1. Read data and define the analytic sample --------------------------------
-  # Download and extract the Korean public-use CSV from the OECD database:
-  # https://www.oecd.org/en/data/datasets/PIAAC-2nd-Cycle-Database.html
-  # CSV codes do not retain the value labels available in SPSS/SAS files.
-  piaac <- read.csv(file = data_file, sep = ";", dec = ".", na.strings = c(".", ".n", ".v"),
-    check.names = FALSE, stringsAsFactors = FALSE)
-
-  test_item <- "E320004S"
-  anchor_item <- "E320003S"
-  pv_vars <- paste0("PVLIT", 1:10)
-  reference_code <- 2L
-  focal_code <- 4L
-
-  required_variables <- c("AGEG10LFS", test_item, anchor_item, pv_vars)
-  missing_variables <- setdiff(required_variables, names(piaac))
-  if (length(missing_variables) > 0L) {
-    stop("Missing CSV columns: ", paste(missing_variables, collapse = ", "))
-  }
-
-  # Retain the two age groups and observed responses to both items.
-  dat <- dplyr::filter(piaac, AGEG10LFS %in% c(reference_code, focal_code),
-    !is.na(.data[[test_item]]), !is.na(.data[[anchor_item]]))
-  # Scored responses must be binary. Do not silently recode an unexpected
-  # missing-value or response code as an incorrect answer.
-  for (item in c(test_item, anchor_item)) {
-    if (!is.numeric(dat[[item]]) || any(!dat[[item]] %in% c(0, 1))) {
-      stop("Expected observed scores 0 or 1 in ", item,
-           ". Check the CSV format and missing-value codes.")
-    }
-  }
-  for (pv in pv_vars) {
-    if (!is.numeric(dat[[pv]]) || any(is.infinite(dat[[pv]]))) {
-      stop("Expected finite numeric plausible values (or NA) in ", pv, ".")
-    }
-  }
-
-  dat <- dplyr::mutate(dat, G = ifelse(AGEG10LFS == reference_code, 0, 1),
-    Y_T = ifelse(.data[[test_item]] == 1, 1, 0), Y_A = ifelse(.data[[anchor_item]] == 1, 1, 0)
-)
-
-  # Reproduce the manuscript sample: 285 reference and 251 focal respondents.
-  stopifnot(nrow(dat) == 536L, sum(dat$G == 0) == 285L, sum(dat$G == 1) == 251L)
-  z_critical <- qnorm(1 - alpha / 2)
-
-  # G2. Conventional uniform logistic-regression DIF ----------------------------
-  # Fit logit Pr(Y_T = 1 | M, G) = beta_0 + beta_1 * M + beta_2 * G.
-  # Standardize each plausible value using the reference-group mean and SD.
-  fit_logistic_pv <- function(pv) {
-    d <- dplyr::filter(dat, !is.na(.data[[pv]]))
-    reference_mean <- mean(d[[pv]][d$G == 0])
-    reference_sd <- sd(d[[pv]][d$G == 0])
-    if (sum(d$G == 0) < 2L || sum(d$G == 1) < 2L || 
-        !is.finite(reference_sd) || reference_sd <= 0) {
-      stop("Insufficient observations or invalid reference-group SD for ", pv, ".")
-    }
-    d$M <- (d[[pv]] - reference_mean) / reference_sd
-
-    fit <- glm(Y_T ~ M + G, family = binomial(), data = d)
-    if (!isTRUE(fit$converged) || isTRUE(fit$boundary) || !is.finite(coef(fit)["G"]) || 
-        !is.finite(vcov(fit)["G", "G"]) || vcov(fit)["G", "G"] <= 0) {
-      stop("Invalid logistic-regression fit for ", pv, ".")
-    }
-    data.frame(PV = pv, beta = unname(coef(fit)["G"]), variance = unname(vcov(fit)["G", "G"])
-)
-  }
-  pv_results <- dplyr::bind_rows(lapply(pv_vars, fit_logistic_pv))
-
-  # Multiple-imputation combining rules:
-  # total variance = mean within-PV variance + (1 + 1/m) * between-PV variance.
-  n_pv <- nrow(pv_results)
-  logistic_estimate <- mean(pv_results$beta)
-  within_variance <- mean(pv_results$variance)
-  between_variance <- var(pv_results$beta)
-  logistic_se <- sqrt(within_variance + (1 + 1 / n_pv) * between_variance)
-  logistic_ci <- logistic_estimate + c(-1, 1) * z_critical * logistic_se
-  logistic_p <- 2 * pnorm(abs(logistic_estimate / logistic_se), lower.tail = FALSE)
-
-  # G3. DID estimation and HC3 inference ----------------------------------------
-  # The coefficient on G is the difference between the group means of Y_T - Y_A.
-  # Under the identifying assumptions, the population DID equals tau.
-  dat$D <- dat$Y_T - dat$Y_A
-  did_fit <- lm(D ~ G, data = dat)
-  did_vcov <- sandwich::vcovHC(did_fit, type = "HC3")
-  did_estimate <- unname(coef(did_fit)["G"])
-  did_se <- sqrt(did_vcov["G", "G"])
-  did_ci <- did_estimate + c(-1, 1) * z_critical * did_se
-  did_p <- 2 * pnorm(abs(did_estimate / did_se), lower.tail = FALSE)
-
-  table1 <- data.frame(Method = c("Logistic-regression DIF", "DID"),
-    Estimate = c(logistic_estimate, did_estimate), SE = c(logistic_se, did_se),
-    CI_Lower = c(logistic_ci[1], did_ci[1]), CI_Upper = c(logistic_ci[2], did_ci[2]),
-    p = c(logistic_p, did_p))
-
-  # G4. Distribution-free sensitivity analysis ---------------------------------
-  # Manuscript calibration inputs (OECD, 2013):
-  #   E320003: slope = 1.446, difficulty = 0.437 (anchor).
-  #   E320004: slope = 1.338, difficulty = 0.399 (test).
-  # Under P_j(theta) = plogis(1.7 * a_j * (theta - b_j)), the maximum
-  # absolute calibrated IRF difference is approximately 0.0329.
-  # EMPIRICAL_ETA = 0.033 is supplied as a fixed sensitivity value.
-  # This widens the DID interval; it does not correct the DID point estimate.
-  bound_df <- 2 * eta
-  ci_df <- c(did_ci[1] - bound_df, did_ci[2] + bound_df)
-
-  # G5. Normal-distribution sensitivity analysis -------------------------------
-  # For each PV: (focal mean - reference mean) / reference SD.
-  # Average the signed differences first, then take the absolute value.
-  # The bound assumes equal-variance normal latent-trait distributions.
-  pv_differences <- dplyr::bind_rows(lapply(pv_vars, function(pv) {
-    reference <- dat[[pv]][dat$G == 0]
-    focal <- dat[[pv]][dat$G == 1]
-    mean_difference <- mean(focal, na.rm = TRUE) -
-      mean(reference, na.rm = TRUE)
-
-    data.frame(PV = pv, difference = mean_difference,
-      mu = mean_difference / sd(reference, na.rm = TRUE))
-  }))
-
-  mu_hat <- mean(pv_differences$mu)
-  bound_normal <- eta * (4 * pnorm(abs(mu_hat) / 2) - 2)
-  ci_normal <- c(did_ci[1] - bound_normal, did_ci[2] + bound_normal)
-
-  # Retain full precision in computations and saved output; round in the paper.
-  sensitivity <- data.frame(Specification = c("Distribution-free", "Equal-variance normal"),
-    eta = eta, mu = c(NA, abs(mu_hat)), Bound = c(bound_df, bound_normal),
-    CI_Lower = c(ci_df[1], ci_normal[1]), CI_Upper = c(ci_df[2], ci_normal[2]))
-
-  # G6. Display and save the empirical results ---------------------------------
-  cat("\nEmpirical illustration: logistic-regression DIF and DID\n")
-  print(table1, digits = 6, row.names = FALSE)
-  cat("\nEmpirical illustration: sensitivity-adjusted confidence intervals\n")
-  print(sensitivity, digits = 6, row.names = FALSE)
-
-  prepare_directory(directory)
-  write_csv(table1, file.path(directory, "table1_empirical_results.csv"))
-  write_csv(sensitivity, file.path(directory, "illustration_sensitivity.csv"))
-
-  metadata <- list(study = "2023 PIAAC Korean empirical illustration",
-    input_file = normalizePath(data_file, winslash = "/"),
-    input_md5 = unname(tools::md5sum(data_file)), test_item = test_item,
-    anchor_item = anchor_item, age_variable = "AGEG10LFS", reference_code = reference_code,
-    focal_code = focal_code, n_reference = sum(dat$G == 0), n_focal = sum(dat$G == 1),
-    plausible_values = pv_vars, weighted = FALSE, alpha = alpha, eta = eta, mu_hat = mu_hat,
-    sensitivity_inputs_fixed = TRUE, confidence_intervals_clipped = FALSE,
-    package_versions = vapply(c("dplyr", "sandwich"),
-      function(package) as.character(utils::packageVersion(package)), character(1)),
-    R_version = R.version.string)
-  save_run_information(metadata, directory)
-
-  invisible(list(table1 = table1, pv_results = pv_results, pv_differences = pv_differences,
-    sensitivity = sensitivity))
-}
-
-# 9. Run the selected analysis --------------------------------------------
-
-run_selected_tasks <- function() {
-  modes <- c("simulations", "outputs", "empirical", "all", "checks", "smoke")
-  if (length(RUN_MODE) != 1L || is.na(RUN_MODE) || !RUN_MODE %in% modes) {
-    stop("RUN_MODE must be one of: ", paste(modes, collapse = ", "))
-  }
-  simulate <- RUN_MODE %in% c("simulations", "all", "smoke")
-  outputs <- simulate || RUN_MODE == "outputs"
-  empirical <- RUN_MODE %in% c("empirical", "all")
-  replications <- if (RUN_MODE == "smoke") 20L else N_REP
-  root <- if (RUN_MODE == "smoke") file.path(OUTPUT_ROOT, "smoke") else OUTPUT_ROOT
-  stopifnot(length(root) == 1L, !is.na(root), nzchar(root))
-  if (simulate) {
-    stopifnot(length(replications) == 1L, is.finite(replications),
-              replications >= 2, replications == floor(replications))
-  }
-  # The manuscript tables and figures use two-sided alpha = .05.
-  if (ALPHA != .05) stop("This manuscript script requires ALPHA = .05.")
-  if (empirical) check_empirical_inputs(EMPIRICAL_DATA_FILE)
-  d1 <- file.path(root, "study1")
-  d2 <- file.path(root, "study2")
-  if (RUN_MODE == "outputs") {
-    for (directory in c(d1, d2)) {
-      path <- file.path(directory, "simulation.rds")
-      if (!file.exists(path)) stop("Missing ", path, ". Run mode 'simulations' first.")
-      if (!identical(readRDS(path)$metadata$alpha, .05)) {
-        stop("Saved results must use alpha = .05 for the manuscript outputs.")
-      }
-    }
-  }
-  if (simulate || RUN_MODE == "checks") check_implementation()
-  if (RUN_MODE == "smoke") message("20 replications per condition; not manuscript results.")
-  if (simulate) simulate_study1(replications, STUDY1_SEED, d1)
-  if (outputs) outputs_study1(d1)
-  if (simulate) simulate_study2(replications, STUDY2_SEED, d2)
-  if (outputs) outputs_study2(d2)
-  if (empirical) {
-    run_empirical_illustration(EMPIRICAL_DATA_FILE, file.path(root, "empirical"),
-                               EMPIRICAL_ETA, ALPHA)
-  }
-  message("Completed: ", RUN_MODE)
-  invisible(NULL)
-}
-
-run_selected_tasks()
+# Verify the HC3 shortcut against its matrix definition on a fixed small example.
+group_check <- rep(c(0, 1), c(19, 31))
+anchor_check <- rep(c(0, 1, 1, 0, 1), 10)
+test_check <- rep(c(1, 0, 1, 1, 0), 10)
+X <- cbind(1, group_check)
+ols <- lm(I(test_check - anchor_check) ~ group_check)
+bread <- solve(crossprod(X))
+hc3 <- bread %*% crossprod(X, X * (residuals(ols) / (1 - hatvalues(ols)))^2) %*% bread
+check <- fit_did(test_check, anchor_check, group_check)
+stopifnot(abs(check["estimate"] - coef(ols)[2]) < 1e-12,
+          abs(check["se"]^2 - hc3[2, 2]) < 1e-12)
+writeLines(capture.output(sessionInfo()), file.path(OUTPUT_DIR, "sessionInfo.txt"))
+writeLines(capture.output(dput(list(
+  run_mode = RUN_MODE, alpha = ALPHA, mu = MU, n_rep_requested = N_REP,
+  figure_font = FIGURE_FONT, final_figure_width_mm = FINAL_FIGURE_WIDTH_MM,
+  N = N_VALUES, tau = TAU_VALUES, eta_true = ETA_TRUE_VALUES,
+  eta_multipliers = ETA_MULTIPLIERS, study1_saved = STUDY1_SAVED,
+  study2_saved = STUDY2_SAVED, empirical_eta = EMPIRICAL_ETA,
+  group_probability = .5, item_responses_conditionally_independent = TRUE,
+  intervals_clipped = FALSE, sensitivity_inputs_fixed = TRUE,
+  study1_seed = 2026, study2_seed = 2027, seed_increment = 1009,
+  run_time = format(Sys.time(), tz = "UTC")))), file.path(OUTPUT_DIR, "settings.txt"))
+message("Finished. Results: ", normalizePath(OUTPUT_DIR))
