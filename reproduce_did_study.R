@@ -1,12 +1,12 @@
-# Identifying Item Bias Without Conditioning: A Difference-in-Differences Approach
-# One self-contained script; base R only (R >= 3.6).
-# Read in order: settings, calculations, Study 1, Study 2, illustration, outputs.
-# Redraw saved CSV results: Rscript reproduce_did_study.R presentation
-# Full simulation run: Rscript reproduce_did_study.R simulations
+# Reproduce the two simulation studies and PIAAC illustration (base R >= 3.6).
+# Default: update figures and tables from saved CSVs; no new simulations.
+# Rscript reproduce_did_study.R presentation
+# Rscript reproduce_did_study.R simulations
+# Rscript reproduce_did_study.R empirical
 
 # 1. Settings -----------------------------------------------------------------
 
-RUN_MODE <- "presentation" # presentation, simulations, study1, study2, outputs, empirical, all, smoke
+RUN_MODE <- "presentation" # Update saved results. Use "simulations" for a new run.
 N_REP <- 5000L
 OUTPUT_DIR <- "results"
 PIAAC_FILE <- "prgkorp2.csv"
@@ -14,9 +14,7 @@ MAKE_FIGURES <- TRUE
 FIGURE_FONT <- "Arial"     # Install this font to preserve the manuscript design.
 FINAL_FIGURE_WIDTH_MM <- 144  # Use the same inclusion width for Figures 4 and 5.
 
-# Optional paths to saved raw simulations. Blank means simulate in simulation
-# modes. In outputs mode, blank means results/study1 or study2/simulation.rds.
-# Earlier simulation_revised.rds files are also accepted through these paths.
+# Optional: reuse raw RDS results instead of generating new samples.
 STUDY1_SAVED <- ""
 STUDY2_SAVED <- ""
 
@@ -58,7 +56,7 @@ if (RUN_MODE != "presentation" && RUN_STUDY2 &&
 dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
 if (RUN_MODE != "presentation") RNGkind("Mersenne-Twister", "Inversion", "Rejection")
 
-# 2. Shared calculations and saved-data loading --------------------------------
+# 2. Estimation and saved results --------------------------------------------
 
 # Integrate a function over N(mu, 1). Used for calibration and population checks.
 normal_mean <- function(fun, mu = MU) {
@@ -68,9 +66,7 @@ normal_mean <- function(fun, mu = MU) {
 }
 
 # DID = mean(Y_T - Y_A | G = 1) - mean(Y_T - Y_A | G = 0).
-# In this two-group regression, the exact HC3 variance is
-# s_1^2 / (n_1 - 1) + s_0^2 / (n_0 - 1), NOT s_1^2/n_1 + s_0^2/n_0.
-# Taking the response difference first retains within-person item covariance.
+# HC3 variance: s1^2/(n1-1) + s0^2/(n0-1), for paired item differences.
 fit_did <- function(y_test, y_anchor, group) {
   stopifnot(length(y_test) == length(y_anchor), length(y_test) == length(group),
             all(y_test %in% c(0, 1)), all(y_anchor %in% c(0, 1)),
@@ -86,7 +82,6 @@ fit_did <- function(y_test, y_anchor, group) {
 }
 
 # Uniform logistic DIF. Record failed fits; do not redraw their datasets.
-# Warnings are retained, including warnings on otherwise valid fits.
 fit_logistic <- function(y_test, matching, group) {
   warnings <- character(0)
   fit <- tryCatch(withCallingHandlers(
@@ -139,7 +134,6 @@ interval_summary <- function(estimate, se, truth, bound = 0) {
 }
 
 # Read either the original repository schema or the revised raw-result schema.
-# Check the design before reusing draws; summaries alone cannot be reanalyzed.
 read_saved <- function(path, design, study) {
   saved <- readRDS(path)
   old <- saved$design
@@ -182,8 +176,6 @@ read_saved <- function(path, design, study) {
 }
 
 # Calibrate the constant logit shift to the desired probability-scale effect.
-# The anchor changes in Study 2; the test IRFs and gamma do not.
-# The interval [-1, 1] brackets the roots for all three specified effect sizes.
 if (RUN_MODE != "presentation") {
   calibration <- data.frame(tau = TAU_VALUES, gamma = 0, tau_achieved = 0)
   for (i in seq_len(nrow(calibration))) {
@@ -203,7 +195,7 @@ if (RUN_MODE != "presentation") {
   write.csv(calibration, file.path(OUTPUT_DIR, "gamma_calibration.csv"), row.names = FALSE)
 }
 
-# 3. Study 1: unchanged design and rejection-rate presentation ------------------
+# 3. Study 1 -----------------------------------------------------------------
 
 if (RUN_STUDY1 && RUN_MODE != "presentation") {
   folder <- file.path(OUTPUT_DIR, "study1")
@@ -287,7 +279,7 @@ if (RUN_STUDY1 && RUN_MODE != "presentation") {
   write.csv(logistic_summary, file.path(folder, "logistic_summary.csv"), row.names = FALSE)
 }
 
-# 4. Study 2: coverage, interval length, and rejection rates --------------------
+# 4. Study 2 -----------------------------------------------------------------
 
 if (RUN_STUDY2 && RUN_MODE != "presentation") {
   folder <- file.path(OUTPUT_DIR, "study2")
@@ -393,7 +385,7 @@ if (RUN_STUDY2 && RUN_MODE != "presentation") {
   write.csv(thresholds, file.path(folder, "eta_thresholds.csv"), row.names = FALSE)
 }
 
-# 5. PIAAC illustration: same estimators, simpler implementation ----------------
+# 5. PIAAC illustration ------------------------------------------------------
 
 if (RUN_EMPIRICAL) {
   folder <- file.path(OUTPUT_DIR, "empirical")
@@ -485,39 +477,22 @@ if (RUN_MODE == "presentation") {
   logistic_summary <- read.csv(file.path(OUTPUT_DIR, required[2]))
   main <- read.csv(file.path(OUTPUT_DIR, required[3]))
   sensitivity <- read.csv(file.path(OUTPUT_DIR, required[4]))
-  # Extra columns from earlier exports are allowed. Required columns and keys
-  # must be present so incomplete summaries cannot silently change the figures.
-  summaries <- list(did_summary, logistic_summary, main, sensitivity)
-  fields <- list(
-    c("N", "tau", "bias", "rmse", "se_sd_ratio", "coverage", "rejection", "n_total"),
-    c("N", "tau", "delta", "rho", "rejection", "n_total", "n_valid", "n_failed"),
-    c("N", "tau", "eta_true", "method", "coverage", "mean_length", "rejection", "n_total"),
-    c("N", "tau", "eta_true", "method", "eta_multiplier", "coverage", "mean_length", "rejection", "n_total"))
-  keys <- list(c("N", "tau"), c("N", "tau", "delta", "rho"),
-               c("N", "tau", "eta_true", "method"),
-               c("N", "tau", "eta_true", "method", "eta_multiplier"))
-  for (i in seq_along(summaries)) {
-    x <- summaries[[i]]
-    absent <- setdiff(fields[[i]], names(x))
-    if (length(absent)) stop(required[i], " lacks columns: ", paste(absent, collapse = ", "))
-    if (anyNA(x[keys[[i]]]) || anyDuplicated(x[keys[[i]]])) {
-      stop("Missing or duplicate condition keys in ", required[i])
-    }
-    stopifnot(all(is.finite(x$n_total)), all(x$n_total >= 2),
-              all(x$n_total == as.integer(x$n_total)))
-    for (metric in intersect(c("coverage", "rejection"), names(x))) {
-      value <- x[[metric]]
-      if (i == 2L) value <- value[x$n_valid > 0]
-      stopifnot(all(is.finite(value)), all(value >= 0 & value <= 1))
-    }
+  stopifnot(all(c("N", "tau", "bias", "rmse", "se_sd_ratio", "coverage",
+                  "rejection", "n_total") %in% names(did_summary)),
+            all(c("N", "tau", "delta", "rho", "rejection", "n_total",
+                  "n_valid", "n_failed") %in% names(logistic_summary)))
+  for (x in list(main, sensitivity)) {
+    stopifnot(all(c("N", "tau", "eta_true", "method", "coverage", "mean_length",
+                    "rejection", "n_total") %in% names(x)),
+              all(is.finite(x$coverage)), all(x$coverage >= 0 & x$coverage <= 1),
+              all(is.finite(x$rejection)), all(x$rejection >= 0 & x$rejection <= 1),
+              all(is.finite(x$mean_length)), all(x$mean_length >= 0))
   }
-  stopifnot(nrow(did_summary) == 9L, nrow(logistic_summary) == 81L,
-            all(is.finite(main$mean_length)), all(main$mean_length >= 0),
-            all(is.finite(sensitivity$mean_length)), all(sensitivity$mean_length >= 0))
+  stopifnot("eta_multiplier" %in% names(sensitivity))
   message("Reusing four CSV summaries; no simulations or empirical analyses will run.")
 }
 
-# 6. Figures: shared layout and typography ------------------------------------
+# 6. Figures -----------------------------------------------------------------
 
 DEVICE_WIDTH <- 9.4
 DEVICE_HEIGHT <- 8.85
@@ -527,13 +502,9 @@ stopifnot(length(FINAL_FIGURE_WIDTH_MM) == 1L,
           is.finite(FINAL_FIGURE_WIDTH_MM), FINAL_FIGURE_WIDTH_MM > 0)
 FIGURE_SCALE <- FINAL_FIGURE_WIDTH_MM / (25.4 * DEVICE_WIDTH)
 
-# Target main-text sizes AFTER insertion into the manuscript (points).
-# Small mathematical subscripts retain their normal relative size.
 TEXT_PT <- c(tick = 9, legend = 9, title = 9.5, panel = 10.5, x = 10, y = 10)
 TEXT_CEX <- TEXT_PT / (DEVICE_POINTSIZE * FIGURE_SCALE)
 
-# PDF/Quartz/Cairo use nominal 0.75-point units for R's lwd.
-# Convert target line widths at final size to source-device lwd values.
 LINE_PT <- c(grid = .35, reference = .45, secondary = .8, primary = 1,
              marker = .6, axis = .5)
 LINE_LWD <- LINE_PT / (.75 * FIGURE_SCALE)
@@ -546,9 +517,6 @@ POINTS <- c(21, 21, 24)
 FILLS <- c("white", "black", "white")
 WIDTHS <- unname(LINE_LWD[c("secondary", "primary", "secondary")])
 
-# Keep the original device dimensions and base point size.
-# Adjust text with TEXT_CEX so enlarging lettering does not enlarge the margins.
-# Arial must be installed; font substitution is controlled by the graphics device.
 open_figure <- function(path, height = DEVICE_HEIGHT) {
   if (identical(Sys.info()[["sysname"]], "Darwin") && isTRUE(capabilities("aqua"))) {
     grDevices::quartz(type = "pdf", file = path, width = DEVICE_WIDTH, height = height,
@@ -561,25 +529,89 @@ open_figure <- function(path, height = DEVICE_HEIGHT) {
   }
 }
 
-# Original Figure 4: heading -> three panels -> x-axis title -> legend, twice.
-figure4_layout <- function() {
-  par(oma = c(.4, 4.8, .4, .3), family = FIGURE_FONT,
-      ps = DEVICE_POINTSIZE, lwd = LINE_LWD["axis"])
-  layout(rbind(c(1, 1, 1), c(2, 3, 4), c(5, 5, 5), c(6, 6, 6),
-               c(0, 0, 0),
-               c(7, 7, 7), c(8, 9, 10), c(11, 11, 11), c(12, 12, 12)),
-         heights = c(.32, 2.3, .24, .48, .10, .32, 2.3, .24, .48))
-}
-
 blank_strip <- function() {
   par(mar = c(0, 0, 0, 0), cex = 1, xaxs = "i", yaxs = "i")
   plot.new()
   plot.window(xlim = c(0, 1), ylim = c(0, 1), xaxs = "i", yaxs = "i")
 }
 
-# Figure 5 extends the same layout to three rows. Typography, horizontal
-# positions, line styles, symbols, and sample-size headings match Figure 4.
-figure5_layout <- function() {
+# Figure 4: rejection rates under invalidity (A) and unreliability (B).
+folder <- file.path(OUTPUT_DIR, "study1")
+if (MAKE_FIGURES && RUN_STUDY1) {
+  did <- read.csv(file.path(folder, "did_summary.csv"))
+  logistic <- read.csv(file.path(folder, "logistic_summary.csv"))
+  taus <- c(0, -.05, -.10)
+  open_figure(file.path(folder, "figure4.pdf"))
+  par(oma = c(.4, 4.8, .4, .3), family = FIGURE_FONT,
+      ps = DEVICE_POINTSIZE, lwd = LINE_LWD["axis"])
+  layout(rbind(c(1, 1, 1), c(2, 3, 4), c(5, 5, 5), c(6, 6, 6),
+               c(0, 0, 0),
+               c(7, 7, 7), c(8, 9, 10), c(11, 11, 11), c(12, 12, 12)),
+         heights = c(.32, 2.3, .24, .48, .10, .32, 2.3, .24, .48))
+  colors <- c("black", "grey35", "grey45", "grey55")
+  line_types <- c(1, 2, 4, 5)
+  symbols <- c(21, 21, 24, 22)
+  widths <- unname(LINE_LWD[c("primary", "secondary", "secondary", "secondary")])
+  for (block in 1:2) {
+    blank_strip()
+    text(0, .5, if (block == 1) "A" else "B", adj = c(0, .5), cex = TEXT_CEX["panel"], font = 2)
+    for (n in c(500, 1000, 2000)) {
+      par(mar = c(2.3, 2.8, 2.5, .8), mgp = c(1.7, .5, 0), tcl = -.2,
+          las = 1, xaxs = "i", yaxs = "i", cex = 1)
+      plot(NA, xlim = c(.005, -.105), ylim = c(-.025, 1.025),
+           xlab = "", ylab = "", xaxt = "n", yaxt = "n", bty = "l")
+      abline(h = c(.25, .5, .75, 1), col = "grey90", lwd = LINE_LWD["grid"])
+      abline(h = .05, col = "grey60", lty = 3, lwd = LINE_LWD["reference"])
+      axis(1, at = taus, labels = c("0", "-0.05", "-0.10"), cex.axis = TEXT_CEX["tick"])
+      axis(2, at = seq(0, 1, .2), labels = c("0", ".2", ".4", ".6", ".8", "1.0"), cex.axis = TEXT_CEX["tick"])
+      mtext(bquote(italic(N) == .(format(n, big.mark = ",", trim = TRUE))),
+            side = 3, line = .8, cex = TEXT_CEX["title"], las = 1)
+      z <- did[did$N == n, ]
+      series <- list(z$rejection[match(taus, z$tau)])
+      for (k in 1:3) {
+        delta <- if (block == 1) c(0, .25, .5)[k] else 0
+        rho <- if (block == 1) 1 else c(1, .8, .6)[k]
+        z <- logistic[logistic$N == n & logistic$delta == delta & logistic$rho == rho, ]
+        series[[k + 1]] <- z$rejection[match(taus, z$tau)]
+      }
+      for (j in c(2, 3, 4, 1)) {
+        lines(taus, series[[j]], col = colors[j], lty = line_types[j], lwd = widths[j])
+      }
+      for (j in c(2, 3, 4, 1)) {
+        points(taus, series[[j]], col = colors[j], pch = symbols[j],
+               bg = if (j == 1) "black" else "white", cex = POINT_CEX, lwd = LINE_LWD["marker"])
+      }
+    }
+    blank_strip()
+    text(.5, .5, expression(tau), cex = TEXT_CEX["x"])
+    blank_strip()
+    labels <- if (block == 1) {
+      expression(DID, paste("Logistic: ", delta == 0),
+                 paste("Logistic: ", delta == .25), paste("Logistic: ", delta == .50))
+    } else {
+      expression(DID, paste("Logistic: ", rho == 1.00),
+                 paste("Logistic: ", rho == .80), paste("Logistic: ", rho == .60))
+    }
+    legend("center", labels, horiz = TRUE, bty = "n", cex = TEXT_CEX["legend"],
+           col = colors, lty = line_types, lwd = widths, pch = symbols,
+           pt.bg = c("black", rep("white", 3)), pt.cex = POINT_CEX,
+           seg.len = 1.5, x.intersp = .65)
+  }
+  mtext("Rejection rate", side = 2, outer = TRUE, line = 2.5,
+        las = 0, at = .55, cex = TEXT_CEX["y"])
+  dev.off()
+}
+
+# Figure 5: coverage (A), mean interval length (B), and rejection rates (C).
+folder <- file.path(OUTPUT_DIR, "study2")
+if (MAKE_FIGURES && RUN_STUDY2) {
+  main <- read.csv(file.path(folder, "main_summary.csv"))
+  sensitivity <- read.csv(file.path(folder, "eta_summary.csv"))
+  # Use common limits across all effect sizes; keep .95 and 1 clearly visible.
+  coverage_limits <- c(max(0, floor((min(main$coverage) - .02) * 10) / 10), 1.025)
+  length_limits <- c(0, max(main$mean_length) * 1.05)
+  open_figure(file.path(folder, "figure5.pdf"), height = FIGURE5_HEIGHT)
+  data <- main[main$tau == -.05, ]
   par(oma = c(.4, 4.8, .4, .3), family = FIGURE_FONT,
       ps = DEVICE_POINTSIZE, lwd = LINE_LWD["axis"])
   layout(rbind(c(1, 1, 1), c(2, 3, 4), c(5, 5, 5), c(6, 6, 6),
@@ -590,37 +622,6 @@ figure5_layout <- function() {
          heights = c(.32, 2.3, .24, .48, .10,
                      .32, 2.3, .24, .48, .10,
                      .32, 2.3, .24, .48))
-}
-
-# Place each legend entry using its own measured width. This keeps the full
-# bound names on one line without reducing the manuscript's 9-point lettering.
-interval_legend <- function() {
-  labels <- c("Unadjusted", "Normal-Distribution Bound", "Distribution-Free Bound")
-  widths <- vapply(seq_along(labels), function(j) {
-    legend(0, .5, labels[j], xjust = 0, yjust = .5, bty = "n",
-           cex = TEXT_CEX["legend"], col = COLORS[j], lty = LINES[j],
-           lwd = WIDTHS[j], pch = POINTS[j], pt.bg = FILLS[j],
-           pt.cex = POINT_CEX, seg.len = 1.5, x.intersp = .65,
-           plot = FALSE)$rect$w
-  }, numeric(1))
-  gap <- .01
-  total <- sum(widths) + 2 * gap
-  if (total > 1) stop("Legend exceeds available width; check the installed font.")
-  left <- (1 - total) / 2
-  for (j in seq_along(labels)) {
-    legend(left, .5, labels[j], xjust = 0, yjust = .5, bty = "n",
-           cex = TEXT_CEX["legend"], col = COLORS[j], lty = LINES[j],
-           lwd = WIDTHS[j], pch = POINTS[j], pt.bg = FILLS[j],
-           pt.cex = POINT_CEX, seg.len = 1.5, x.intersp = .65)
-    left <- left + widths[j] + gap
-  }
-}
-
-# A = coverage; B = mean interval length; C = rejection rate.
-# The .95 reference line belongs to coverage only. At tau = -.05 the rejection
-# panel describes detection, so .05 is not a target line and is not drawn there.
-draw_interval_panels <- function(data, coverage_limits, length_limits) {
-  figure5_layout()
   x_values <- sort(unique(data$eta_true))
   stopifnot(length(x_values) == 4L, all(c("coverage", "mean_length", "rejection") %in% names(data)))
   x_padding <- diff(range(x_values)) / 22
@@ -679,95 +680,36 @@ draw_interval_panels <- function(data, coverage_limits, length_limits) {
     blank_strip()
     text(.5, .5, expression(eta[0]), cex = TEXT_CEX["x"])
     blank_strip()
-    interval_legend()
+    labels <- c("Unadjusted", "Normal-Distribution Bound", "Distribution-Free Bound")
+    legend_widths <- vapply(seq_along(labels), function(j) {
+      legend(0, .5, labels[j], xjust = 0, yjust = .5, bty = "n",
+             cex = TEXT_CEX["legend"], col = COLORS[j], lty = LINES[j],
+             lwd = WIDTHS[j], pch = POINTS[j], pt.bg = FILLS[j],
+             pt.cex = POINT_CEX, seg.len = 1.5, x.intersp = .65,
+             plot = FALSE)$rect$w
+    }, numeric(1))
+    gap <- .01
+    total <- sum(legend_widths) + 2 * gap
+    if (total > 1) stop("Legend exceeds available width; check the installed font.")
+    left <- (1 - total) / 2
+    for (j in seq_along(labels)) {
+      legend(left, .5, labels[j], xjust = 0, yjust = .5, bty = "n",
+             cex = TEXT_CEX["legend"], col = COLORS[j], lty = LINES[j],
+             lwd = WIDTHS[j], pch = POINTS[j], pt.bg = FILLS[j],
+             pt.cex = POINT_CEX, seg.len = 1.5, x.intersp = .65)
+      left <- left + legend_widths[j] + gap
+    }
   }
   for (block in 1:3) {
     mtext(y_labels[block], side = 2, outer = TRUE, line = 2.5,
           las = 0, at = y_centers[block], cex = TEXT_CEX["y"])
   }
-}
-
-# Study 1: keep the existing two-block, three-column rejection-rate design.
-folder <- file.path(OUTPUT_DIR, "study1")
-if (MAKE_FIGURES && RUN_STUDY1) {
-  did <- read.csv(file.path(folder, "did_summary.csv"))
-  logistic <- read.csv(file.path(folder, "logistic_summary.csv"))
-  taus <- c(0, -.05, -.10)
-  open_figure(file.path(folder, "figure4.pdf"))
-  figure4_layout()
-  colors <- c("black", "grey35", "grey45", "grey55")
-  line_types <- c(1, 2, 4, 5)
-  symbols <- c(21, 21, 24, 22)
-  widths <- unname(LINE_LWD[c("primary", "secondary", "secondary", "secondary")])
-  for (block in 1:2) {
-    blank_strip()
-    text(0, .5, if (block == 1) "A" else "B", adj = c(0, .5), cex = TEXT_CEX["panel"], font = 2)
-    for (n in c(500, 1000, 2000)) {
-      par(mar = c(2.3, 2.8, 2.5, .8), mgp = c(1.7, .5, 0), tcl = -.2,
-          las = 1, xaxs = "i", yaxs = "i", cex = 1)
-      plot(NA, xlim = c(.005, -.105), ylim = c(-.025, 1.025),
-           xlab = "", ylab = "", xaxt = "n", yaxt = "n", bty = "l")
-      abline(h = c(.25, .5, .75, 1), col = "grey90", lwd = LINE_LWD["grid"])
-      abline(h = .05, col = "grey60", lty = 3, lwd = LINE_LWD["reference"])
-      axis(1, at = taus, labels = c("0", "-0.05", "-0.10"), cex.axis = TEXT_CEX["tick"])
-      axis(2, at = seq(0, 1, .2), labels = c("0", ".2", ".4", ".6", ".8", "1.0"), cex.axis = TEXT_CEX["tick"])
-      mtext(bquote(italic(N) == .(format(n, big.mark = ",", trim = TRUE))),
-            side = 3, line = .8, cex = TEXT_CEX["title"], las = 1)
-      z <- did[did$N == n, ]
-      series <- list(z$rejection[match(taus, z$tau)])
-      for (k in 1:3) {
-        delta <- if (block == 1) c(0, .25, .5)[k] else 0
-        rho <- if (block == 1) 1 else c(1, .8, .6)[k]
-        z <- logistic[logistic$N == n & logistic$delta == delta & logistic$rho == rho, ]
-        series[[k + 1]] <- z$rejection[match(taus, z$tau)]
-      }
-      for (j in c(2, 3, 4, 1)) {
-        lines(taus, series[[j]], col = colors[j], lty = line_types[j], lwd = widths[j])
-      }
-      for (j in c(2, 3, 4, 1)) {
-        points(taus, series[[j]], col = colors[j], pch = symbols[j],
-               bg = if (j == 1) "black" else "white", cex = POINT_CEX, lwd = LINE_LWD["marker"])
-      }
-    }
-    blank_strip()
-    text(.5, .5, expression(tau), cex = TEXT_CEX["x"])
-    blank_strip()
-    labels <- if (block == 1) {
-      expression(DID, paste("Logistic: ", delta == 0),
-                 paste("Logistic: ", delta == .25), paste("Logistic: ", delta == .50))
-    } else {
-      expression(DID, paste("Logistic: ", rho == 1.00),
-                 paste("Logistic: ", rho == .80), paste("Logistic: ", rho == .60))
-    }
-    legend("center", labels, horiz = TRUE, bty = "n", cex = TEXT_CEX["legend"],
-           col = colors, lty = line_types, lwd = widths, pch = symbols,
-           pt.bg = c("black", rep("white", 3)), pt.cex = POINT_CEX,
-           seg.len = 1.5, x.intersp = .65)
-  }
-  mtext("Rejection rate", side = 2, outer = TRUE, line = 2.5,
-        las = 0, at = .55, cex = TEXT_CEX["y"])
-  dev.off()
-}
-
-# Study 2: show one nonzero effect in the main text; do not pool over tau.
-folder <- file.path(OUTPUT_DIR, "study2")
-if (MAKE_FIGURES && RUN_STUDY2) {
-  main <- read.csv(file.path(folder, "main_summary.csv"))
-  sensitivity <- read.csv(file.path(folder, "eta_summary.csv"))
-  # Use common limits across all effect sizes; keep .95 and 1 clearly visible.
-  coverage_limits <- c(max(0, floor((min(main$coverage) - .02) * 10) / 10), 1.025)
-  length_limits <- c(0, max(main$mean_length) * 1.05)
-  open_figure(file.path(folder, "figure5.pdf"), height = FIGURE5_HEIGHT)
-  draw_interval_panels(main[main$tau == -.05, ], coverage_limits, length_limits)
   dev.off()
 
 }
 
-# 7. Supplementary tables: manuscript-ready LaTeX ------------------------------
-# These use the manuscript's CUP macros (TBL, TCH, fntable, and botrule).
-# Table numbers are assigned by LaTeX; the files do not reset its counters.
+# 7. Supplementary tables ----------------------------------------------------
 
-# Consistent decimal display, including -.10 rather than -0.10.
 fmt <- function(x, digits = 3L, leading_zero = FALSE) {
   x <- round(x, digits)
   x[x == 0 & !is.na(x)] <- 0
@@ -777,8 +719,6 @@ fmt <- function(x, digits = 3L, leading_zero = FALSE) {
   out
 }
 
-# One writer handles the shared table structure; each table below supplies
-# its own headers, rows, and note. No statistical calculations occur here.
 write_table <- function(data, headers, caption, label, note, path,
                         breaks = integer(0), panel_titles = NULL) {
   body <- character(0)
@@ -945,7 +885,7 @@ if (RUN_STUDY2) {
     breaks = c(8L, 15L))
 }
 
-# 8. Numerical checks and run record ------------------------------------------
+# 8. Checks and run record ---------------------------------------------------
 # Check key identities on the actual results, without generating new datasets.
 if (RUN_STUDY2 && RUN_MODE != "presentation") {
   for (i in unique(main$condition_id)) {
@@ -963,19 +903,6 @@ if (RUN_STUDY2 && RUN_MODE != "presentation") {
   }
 }
 
-# Verify the HC3 shortcut against its matrix definition on a fixed small example.
-if (RUN_MODE != "presentation") {
-  group_check <- rep(c(0, 1), c(19, 31))
-  anchor_check <- rep(c(0, 1, 1, 0, 1), 10)
-  test_check <- rep(c(1, 0, 1, 1, 0), 10)
-  X <- cbind(1, group_check)
-  ols <- lm(I(test_check - anchor_check) ~ group_check)
-  bread <- solve(crossprod(X))
-  hc3 <- bread %*% crossprod(X, X * (residuals(ols) / (1 - hatvalues(ols)))^2) %*% bread
-  check <- fit_did(test_check, anchor_check, group_check)
-  stopifnot(abs(check["estimate"] - coef(ols)[2]) < 1e-12,
-            abs(check["se"]^2 - hc3[2, 2]) < 1e-12)
-}
 if (RUN_MODE == "presentation") {
   # Keep the simulation run record intact. These settings describe rendering,
   # not a new analysis or the provenance of the supplied summaries.
