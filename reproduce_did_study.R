@@ -1,11 +1,12 @@
 # Identifying Item Bias Without Conditioning: A Difference-in-Differences Approach
 # One self-contained script; base R only (R >= 3.6).
 # Read in order: settings, calculations, Study 1, Study 2, illustration, outputs.
-# Run from the repository folder: Rscript reproduce_did_study.R simulations
+# Redraw saved CSV results: Rscript reproduce_did_study.R presentation
+# Full simulation run: Rscript reproduce_did_study.R simulations
 
 # 1. Settings -----------------------------------------------------------------
 
-RUN_MODE <- "simulations"  # simulations, study1, study2, outputs, empirical, all, smoke
+RUN_MODE <- "presentation" # presentation, simulations, study1, study2, outputs, empirical, all, smoke
 N_REP <- 5000L
 OUTPUT_DIR <- "results"
 PIAAC_FILE <- "prgkorp2.csv"
@@ -22,10 +23,10 @@ STUDY2_SAVED <- ""
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) == 1L) RUN_MODE <- args[1L]
 if (length(args) > 1L) stop("Supply at most one run mode.")
-stopifnot(RUN_MODE %in% c("simulations", "study1", "study2", "outputs",
+stopifnot(RUN_MODE %in% c("presentation", "simulations", "study1", "study2", "outputs",
                         "empirical", "all", "smoke"))
-RUN_STUDY1 <- RUN_MODE %in% c("simulations", "study1", "outputs", "all", "smoke")
-RUN_STUDY2 <- RUN_MODE %in% c("simulations", "study2", "outputs", "all", "smoke")
+RUN_STUDY1 <- RUN_MODE %in% c("presentation", "simulations", "study1", "outputs", "all", "smoke")
+RUN_STUDY2 <- RUN_MODE %in% c("presentation", "simulations", "study2", "outputs", "all", "smoke")
 RUN_EMPIRICAL <- RUN_MODE %in% c("empirical", "all")
 if (RUN_MODE == "smoke") {
   N_REP <- 20L
@@ -46,16 +47,18 @@ EMPIRICAL_ETA <- .033
 Z <- qnorm(1 - ALPHA / 2)
 stopifnot(getRversion() >= "3.6.0", N_REP >= 2, N_REP == as.integer(N_REP))
 if (RUN_EMPIRICAL && !file.exists(PIAAC_FILE)) stop("PIAAC CSV not found: ", PIAAC_FILE)
-if (RUN_STUDY1 && nzchar(STUDY1_SAVED) && !file.exists(STUDY1_SAVED)) {
+if (RUN_MODE != "presentation" && RUN_STUDY1 &&
+    nzchar(STUDY1_SAVED) && !file.exists(STUDY1_SAVED)) {
   stop("Saved Study 1 results not found: ", STUDY1_SAVED)
 }
-if (RUN_STUDY2 && nzchar(STUDY2_SAVED) && !file.exists(STUDY2_SAVED)) {
+if (RUN_MODE != "presentation" && RUN_STUDY2 &&
+    nzchar(STUDY2_SAVED) && !file.exists(STUDY2_SAVED)) {
   stop("Saved Study 2 results not found: ", STUDY2_SAVED)
 }
 dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
-RNGkind("Mersenne-Twister", "Inversion", "Rejection")
+if (RUN_MODE != "presentation") RNGkind("Mersenne-Twister", "Inversion", "Rejection")
 
-# 2. Shared calculations and saved-data loading -------------------------------------------------
+# 2. Shared calculations and saved-data loading --------------------------------
 
 # Integrate a function over N(mu, 1). Used for calibration and population checks.
 normal_mean <- function(fun, mu = MU) {
@@ -181,26 +184,28 @@ read_saved <- function(path, design, study) {
 # Calibrate the constant logit shift to the desired probability-scale effect.
 # The anchor changes in Study 2; the test IRFs and gamma do not.
 # The interval [-1, 1] brackets the roots for all three specified effect sizes.
-calibration <- data.frame(tau = TAU_VALUES, gamma = 0, tau_achieved = 0)
-for (i in seq_len(nrow(calibration))) {
-  target <- calibration$tau[i]
-  if (target != 0) {
-    calibration$gamma[i] <- uniroot(function(gamma) {
-      normal_mean(function(theta) plogis(1.5 * theta + gamma) -
-                    plogis(1.5 * theta)) - target
-    }, c(-1, 1), tol = 1e-12)$root
+if (RUN_MODE != "presentation") {
+  calibration <- data.frame(tau = TAU_VALUES, gamma = 0, tau_achieved = 0)
+  for (i in seq_len(nrow(calibration))) {
+    target <- calibration$tau[i]
+    if (target != 0) {
+      calibration$gamma[i] <- uniroot(function(gamma) {
+        normal_mean(function(theta) plogis(1.5 * theta + gamma) -
+                      plogis(1.5 * theta)) - target
+      }, c(-1, 1), tol = 1e-12)$root
+    }
+    gamma <- calibration$gamma[i]
+    calibration$tau_achieved[i] <- normal_mean(function(theta) {
+      plogis(1.5 * theta + gamma) - plogis(1.5 * theta)
+    })
   }
-  gamma <- calibration$gamma[i]
-  calibration$tau_achieved[i] <- normal_mean(function(theta) {
-    plogis(1.5 * theta + gamma) - plogis(1.5 * theta)
-  })
+  stopifnot(max(abs(calibration$tau - calibration$tau_achieved)) < 1e-8)
+  write.csv(calibration, file.path(OUTPUT_DIR, "gamma_calibration.csv"), row.names = FALSE)
 }
-stopifnot(max(abs(calibration$tau - calibration$tau_achieved)) < 1e-8)
-write.csv(calibration, file.path(OUTPUT_DIR, "gamma_calibration.csv"), row.names = FALSE)
 
 # 3. Study 1: unchanged design and rejection-rate presentation ------------------
 
-if (RUN_STUDY1) {
+if (RUN_STUDY1 && RUN_MODE != "presentation") {
   folder <- file.path(OUTPUT_DIR, "study1")
   dir.create(folder, recursive = TRUE, showWarnings = FALSE)
   design1 <- expand.grid(N = N_VALUES, tau = TAU_VALUES,
@@ -282,9 +287,9 @@ if (RUN_STUDY1) {
   write.csv(logistic_summary, file.path(folder, "logistic_summary.csv"), row.names = FALSE)
 }
 
-# 4. Study 2: coverage and interval length -------------------------------------
+# 4. Study 2: coverage, interval length, and rejection rates --------------------
 
-if (RUN_STUDY2) {
+if (RUN_STUDY2 && RUN_MODE != "presentation") {
   folder <- file.path(OUTPUT_DIR, "study2")
   dir.create(folder, recursive = TRUE, showWarnings = FALSE)
   design2 <- expand.grid(N = N_VALUES, tau = TAU_VALUES, eta_true = ETA_TRUE_VALUES,
@@ -386,8 +391,6 @@ if (RUN_STUDY2) {
   thresholds <- data.frame(method = c("Normal", "Distribution-free"),
     minimum_multiplier = c(abs(error_per_eta) / normal_factor, abs(error_per_eta) / 2))
   write.csv(thresholds, file.path(folder, "eta_thresholds.csv"), row.names = FALSE)
-
-
 }
 
 # 5. PIAAC illustration: same estimators, simpler implementation ----------------
@@ -468,10 +471,57 @@ if (RUN_EMPIRICAL) {
   print(empirical_sensitivity, row.names = FALSE)
 }
 
+# Presentation mode reads the saved summaries only; it never simulates samples.
+if (RUN_MODE == "presentation") {
+  required <- c("study1/did_summary.csv", "study1/logistic_summary.csv",
+                "study2/main_summary.csv", "study2/eta_summary.csv")
+  missing <- required[!file.exists(file.path(OUTPUT_DIR, required))]
+  if (length(missing)) stop(
+    "Presentation mode needs saved CSV summaries under OUTPUT_DIR. Missing: ",
+    paste(missing, collapse = ", "),
+    ". Copy existing summaries to these paths, use outputs with saved RDS files, ",
+    "or explicitly run simulations. No simulations were started.")
+  did_summary <- read.csv(file.path(OUTPUT_DIR, required[1]))
+  logistic_summary <- read.csv(file.path(OUTPUT_DIR, required[2]))
+  main <- read.csv(file.path(OUTPUT_DIR, required[3]))
+  sensitivity <- read.csv(file.path(OUTPUT_DIR, required[4]))
+  # Extra columns from earlier exports are allowed. Required columns and keys
+  # must be present so incomplete summaries cannot silently change the figures.
+  summaries <- list(did_summary, logistic_summary, main, sensitivity)
+  fields <- list(
+    c("N", "tau", "bias", "rmse", "se_sd_ratio", "coverage", "rejection", "n_total"),
+    c("N", "tau", "delta", "rho", "rejection", "n_total", "n_valid", "n_failed"),
+    c("N", "tau", "eta_true", "method", "coverage", "mean_length", "rejection", "n_total"),
+    c("N", "tau", "eta_true", "method", "eta_multiplier", "coverage", "mean_length", "rejection", "n_total"))
+  keys <- list(c("N", "tau"), c("N", "tau", "delta", "rho"),
+               c("N", "tau", "eta_true", "method"),
+               c("N", "tau", "eta_true", "method", "eta_multiplier"))
+  for (i in seq_along(summaries)) {
+    x <- summaries[[i]]
+    absent <- setdiff(fields[[i]], names(x))
+    if (length(absent)) stop(required[i], " lacks columns: ", paste(absent, collapse = ", "))
+    if (anyNA(x[keys[[i]]]) || anyDuplicated(x[keys[[i]]])) {
+      stop("Missing or duplicate condition keys in ", required[i])
+    }
+    stopifnot(all(is.finite(x$n_total)), all(x$n_total >= 2),
+              all(x$n_total == as.integer(x$n_total)))
+    for (metric in intersect(c("coverage", "rejection"), names(x))) {
+      value <- x[[metric]]
+      if (i == 2L) value <- value[x$n_valid > 0]
+      stopifnot(all(is.finite(value)), all(value >= 0 & value <= 1))
+    }
+  }
+  stopifnot(nrow(did_summary) == 9L, nrow(logistic_summary) == 81L,
+            all(is.finite(main$mean_length)), all(main$mean_length >= 0),
+            all(is.finite(sensitivity$mean_length)), all(sensitivity$mean_length >= 0))
+  message("Reusing four CSV summaries; no simulations or empirical analyses will run.")
+}
+
 # 6. Figures: shared layout and typography ------------------------------------
 
 DEVICE_WIDTH <- 9.4
 DEVICE_HEIGHT <- 8.85
+FIGURE5_HEIGHT <- 11.8  # Three rows, with unchanged text sizes at 144 mm width.
 DEVICE_POINTSIZE <- 12
 stopifnot(length(FINAL_FIGURE_WIDTH_MM) == 1L,
           is.finite(FINAL_FIGURE_WIDTH_MM), FINAL_FIGURE_WIDTH_MM > 0)
@@ -499,12 +549,12 @@ WIDTHS <- unname(LINE_LWD[c("secondary", "primary", "secondary")])
 # Keep the original device dimensions and base point size.
 # Adjust text with TEXT_CEX so enlarging lettering does not enlarge the margins.
 # Arial must be installed; font substitution is controlled by the graphics device.
-open_figure <- function(path) {
+open_figure <- function(path, height = DEVICE_HEIGHT) {
   if (identical(Sys.info()[["sysname"]], "Darwin") && isTRUE(capabilities("aqua"))) {
-    grDevices::quartz(type = "pdf", file = path, width = DEVICE_WIDTH, height = DEVICE_HEIGHT,
+    grDevices::quartz(type = "pdf", file = path, width = DEVICE_WIDTH, height = height,
                      family = FIGURE_FONT, pointsize = DEVICE_POINTSIZE)
   } else if (isTRUE(capabilities("cairo"))) {
-    grDevices::cairo_pdf(path, width = DEVICE_WIDTH, height = DEVICE_HEIGHT,
+    grDevices::cairo_pdf(path, width = DEVICE_WIDTH, height = height,
                         family = FIGURE_FONT, pointsize = DEVICE_POINTSIZE, onefile = TRUE)
   } else {
     stop("PDF output requires native macOS Quartz or Cairo support in R.")
@@ -527,70 +577,114 @@ blank_strip <- function() {
   plot.window(xlim = c(0, 1), ylim = c(0, 1), xaxs = "i", yaxs = "i")
 }
 
-# Figure 5: A = coverage; B = mean interval length.
-# Effect sizes and sensitivity specifications belong in the LaTeX captions.
-draw_interval_panels <- function(data, x_variable, x_label,
-                                 coverage_limits, length_limits) {
-  figure4_layout()
-  x_values <- sort(unique(data[[x_variable]]))
+# Figure 5 extends the same layout to three rows. Typography, horizontal
+# positions, line styles, symbols, and sample-size headings match Figure 4.
+figure5_layout <- function() {
+  par(oma = c(.4, 4.8, .4, .3), family = FIGURE_FONT,
+      ps = DEVICE_POINTSIZE, lwd = LINE_LWD["axis"])
+  layout(rbind(c(1, 1, 1), c(2, 3, 4), c(5, 5, 5), c(6, 6, 6),
+               c(0, 0, 0),
+               c(7, 7, 7), c(8, 9, 10), c(11, 11, 11), c(12, 12, 12),
+               c(0, 0, 0),
+               c(13, 13, 13), c(14, 15, 16), c(17, 17, 17), c(18, 18, 18)),
+         heights = c(.32, 2.3, .24, .48, .10,
+                     .32, 2.3, .24, .48, .10,
+                     .32, 2.3, .24, .48))
+}
+
+# Place each legend entry using its own measured width. This keeps the full
+# bound names on one line without reducing the manuscript's 9-point lettering.
+interval_legend <- function() {
+  labels <- c("Unadjusted", "Normal-Distribution Bound", "Distribution-Free Bound")
+  widths <- vapply(seq_along(labels), function(j) {
+    legend(0, .5, labels[j], xjust = 0, yjust = .5, bty = "n",
+           cex = TEXT_CEX["legend"], col = COLORS[j], lty = LINES[j],
+           lwd = WIDTHS[j], pch = POINTS[j], pt.bg = FILLS[j],
+           pt.cex = POINT_CEX, seg.len = 1.5, x.intersp = .65,
+           plot = FALSE)$rect$w
+  }, numeric(1))
+  gap <- .01
+  total <- sum(widths) + 2 * gap
+  if (total > 1) stop("Legend exceeds available width; check the installed font.")
+  left <- (1 - total) / 2
+  for (j in seq_along(labels)) {
+    legend(left, .5, labels[j], xjust = 0, yjust = .5, bty = "n",
+           cex = TEXT_CEX["legend"], col = COLORS[j], lty = LINES[j],
+           lwd = WIDTHS[j], pch = POINTS[j], pt.bg = FILLS[j],
+           pt.cex = POINT_CEX, seg.len = 1.5, x.intersp = .65)
+    left <- left + widths[j] + gap
+  }
+}
+
+# A = coverage; B = mean interval length; C = rejection rate.
+# The .95 reference line belongs to coverage only. At tau = -.05 the rejection
+# panel describes detection, so .05 is not a target line and is not drawn there.
+draw_interval_panels <- function(data, coverage_limits, length_limits) {
+  figure5_layout()
+  x_values <- sort(unique(data$eta_true))
+  stopifnot(length(x_values) == 4L, all(c("coverage", "mean_length", "rejection") %in% names(data)))
   x_padding <- diff(range(x_values)) / 22
-  x_ticks <- x_values
-  x_tick_labels <- sprintf("%.2f", x_ticks)
-  x_tick_labels[x_ticks == 0] <- "0"
-  for (block in 1:2) {
+  x_tick_labels <- sprintf("%.2f", x_values)
+  x_tick_labels[x_values == 0] <- "0"
+  metrics <- c("coverage", "mean_length", "rejection")
+  y_labels <- c("Coverage", "Mean interval length", "Rejection rate")
+  y_centers <- numeric(3)
+  for (block in 1:3) {
     blank_strip()
-    text(0, .5, if (block == 1) "A" else "B", adj = c(0, .5),
+    text(0, .5, LETTERS[block], adj = c(0, .5),
          cex = TEXT_CEX["panel"], font = 2)
-    metric <- if (block == 1) "coverage" else "mean_length"
-    limits <- if (block == 1) coverage_limits else length_limits
+    metric <- metrics[block]
+    limits <- list(coverage_limits, length_limits, c(-.025, 1.025))[[block]]
     ticks <- if (block == 1) {
       seq(ceiling(limits[1] * 10) / 10, 1, by = .1)
-    } else {
+    } else if (block == 2) {
       pretty(c(0, limits[2]), n = 4)
-    }
+    } else seq(0, 1, by = .2)
     ticks <- ticks[ticks >= limits[1] & ticks <= limits[2]]
-    labels <- sub("^0\\.", ".", sprintf("%.1f", ticks))
+    labels <- sprintf("%.1f", ticks)
+    if (block != 2) labels <- sub("^0\\.", ".", labels)
     labels[ticks == 0] <- "0"
-    for (n in c(500, 1000, 2000)) {
+    for (n in N_VALUES) {
       panel <- data[data$N == n, ]
       par(mar = c(2.3, 2.8, 2.5, .8), mgp = c(1.7, .5, 0),
           tcl = -.2, las = 1, xaxs = "i", yaxs = "i", cex = 1)
       plot(NA, xlim = range(x_values) + c(-1, 1) * x_padding,
            ylim = limits, xlab = "", ylab = "", xaxt = "n", yaxt = "n", bty = "l")
+      # Outer-margin coordinates, centered on the actual plotting region.
+      figure <- par("fig")
+      plot_region <- par("plt")
+      center <- figure[3] + mean(plot_region[3:4]) * diff(figure[3:4])
+      inner <- par("omd")
+      y_centers[block] <- (center - inner[3]) / diff(inner[3:4])
       abline(h = ticks[ticks > 0], col = "grey90", lwd = LINE_LWD["grid"])
       if (block == 1) abline(h = .95, col = "grey60", lty = 3, lwd = LINE_LWD["reference"])
-      axis(1, at = x_ticks, labels = x_tick_labels, cex.axis = TEXT_CEX["tick"])
+      axis(1, at = x_values, labels = x_tick_labels, cex.axis = TEXT_CEX["tick"])
       axis(2, at = ticks, labels = labels, cex.axis = TEXT_CEX["tick"])
       mtext(bquote(italic(N) == .(format(n, big.mark = ",", trim = TRUE))),
             side = 3, line = .8, cex = TEXT_CEX["title"], las = 1)
-      # Draw the black normal-bound curve last, as with DID in Figure 4.
       for (j in c(1, 3, 2)) {
         z <- panel[panel$method == METHODS[j], ]
-        z <- z[order(z[[x_variable]]), ]
-        if (nrow(z) != length(x_values) || anyDuplicated(z[[x_variable]]) ||
-            !isTRUE(all.equal(z[[x_variable]], x_values))) {
-          stop("Missing or duplicated conditions in an interval figure.")
-        }
+        z <- z[order(z$eta_true), ]
+        stopifnot(nrow(z) == length(x_values), !anyDuplicated(z$eta_true),
+                  isTRUE(all.equal(z$eta_true, x_values)), all(is.finite(z[[metric]])))
         lines(x_values, z[[metric]], col = COLORS[j], lty = LINES[j], lwd = WIDTHS[j])
       }
       for (j in c(1, 3, 2)) {
         z <- panel[panel$method == METHODS[j], ]
-        z <- z[order(z[[x_variable]]), ]
+        z <- z[order(z$eta_true), ]
         points(x_values, z[[metric]], col = COLORS[j], pch = POINTS[j],
                bg = FILLS[j], cex = POINT_CEX, lwd = LINE_LWD["marker"])
       }
     }
     blank_strip()
-    text(.5, .5, x_label, cex = TEXT_CEX["x"])
+    text(.5, .5, expression(eta[0]), cex = TEXT_CEX["x"])
     blank_strip()
-    legend("center", c("Unadjusted", "Normal-distribution", "Distribution-free"),
-           horiz = TRUE, bty = "n", cex = TEXT_CEX["legend"], col = COLORS, lty = LINES,
-           lwd = WIDTHS, pch = POINTS, pt.bg = FILLS, pt.cex = POINT_CEX, seg.len = 1.5, x.intersp = .65)
+    interval_legend()
   }
-  mtext("Coverage", side = 2, outer = TRUE, line = 2.5,
-        las = 0, at = .78, cex = TEXT_CEX["y"])
-  mtext("Mean interval length", side = 2, outer = TRUE, line = 2.5,
-        las = 0, at = .27, cex = TEXT_CEX["y"])
+  for (block in 1:3) {
+    mtext(y_labels[block], side = 2, outer = TRUE, line = 2.5,
+          las = 0, at = y_centers[block], cex = TEXT_CEX["y"])
+  }
 }
 
 # Study 1: keep the existing two-block, three-column rejection-rate design.
@@ -653,8 +747,6 @@ if (MAKE_FIGURES && RUN_STUDY1) {
   mtext("Rejection rate", side = 2, outer = TRUE, line = 2.5,
         las = 0, at = .55, cex = TEXT_CEX["y"])
   dev.off()
-
-
 }
 
 # Study 2: show one nonzero effect in the main text; do not pool over tau.
@@ -663,11 +755,10 @@ if (MAKE_FIGURES && RUN_STUDY2) {
   main <- read.csv(file.path(folder, "main_summary.csv"))
   sensitivity <- read.csv(file.path(folder, "eta_summary.csv"))
   # Use common limits across all effect sizes; keep .95 and 1 clearly visible.
-  coverage_limits <- c(max(0, floor((min(main$coverage) - .02) * 10) / 10), 1.01)
+  coverage_limits <- c(max(0, floor((min(main$coverage) - .02) * 10) / 10), 1.025)
   length_limits <- c(0, max(main$mean_length) * 1.05)
-  open_figure(file.path(folder, "figure5.pdf"))
-  draw_interval_panels(main[main$tau == -.05, ], "eta_true", expression(eta[0]),
-                       coverage_limits, length_limits)
+  open_figure(file.path(folder, "figure5.pdf"), height = FIGURE5_HEIGHT)
+  draw_interval_panels(main[main$tau == -.05, ], coverage_limits, length_limits)
   dev.off()
 
 }
@@ -677,21 +768,27 @@ if (MAKE_FIGURES && RUN_STUDY2) {
 # Table numbers are assigned by LaTeX; the files do not reset its counters.
 
 # Consistent decimal display, including -.10 rather than -0.10.
-fmt <- function(x, digits = 3L) {
+fmt <- function(x, digits = 3L, leading_zero = FALSE) {
   x <- round(x, digits)
   x[x == 0 & !is.na(x)] <- 0
   out <- sprintf(paste0("%.", digits, "f"), x)
-  out <- sub("^(-?)0\\.", "\\1.", out)
+  if (!leading_zero) out <- sub("^(-?)0\\.", "\\1.", out)
   out[is.na(x)] <- "---"
   out
 }
 
 # One writer handles the shared table structure; each table below supplies
 # its own headers, rows, and note. No statistical calculations occur here.
-write_table <- function(data, headers, caption, label, note, path, breaks = integer(0)) {
+write_table <- function(data, headers, caption, label, note, path,
+                        breaks = integer(0), panel_titles = NULL) {
   body <- character(0)
   for (i in seq_len(nrow(data))) {
     if (i %in% breaks) body <- c(body, "\\addlinespace")
+    title <- panel_titles[as.character(i)]
+    if (length(title) && !is.na(title)) {
+      body <- c(body, paste0("\\multicolumn{", ncol(data), "}{l}{\\textit{", title,
+                             "}} \\\\"), "\\addlinespace")
+    }
     body <- c(body, paste0(paste(as.character(unlist(data[i, ], use.names = FALSE)),
                                 collapse = " & "), " \\\\"))
   }
@@ -710,8 +807,8 @@ if (RUN_STUDY1) {
   folder <- file.path(OUTPUT_DIR, "study1")
   d <- did_summary[order(did_summary$N, -did_summary$tau), ]
   tab <- data.frame(N = format(d$N, big.mark = ",", trim = TRUE),
-    tau = fmt(d$tau, 2), bias = fmt(d$bias, 4), RMSE = fmt(d$rmse),
-    SE_SD = fmt(d$se_sd_ratio), coverage = fmt(d$coverage, 4),
+    tau = fmt(d$tau, 2), bias = fmt(d$bias, 4, leading_zero = TRUE), RMSE = fmt(d$rmse, leading_zero = TRUE),
+    SE_SD = fmt(d$se_sd_ratio, leading_zero = TRUE), coverage = fmt(d$coverage, 4),
     rejection = fmt(d$rejection, 4))
   tab$N[duplicated(d$N)] <- ""
   pooled <- unique(d$n_total)
@@ -736,7 +833,7 @@ if (RUN_STUDY1) {
   # S2: the full crossed logistic-regression DIF design.
   keys <- expand.grid(delta = c(0, .25, .50), N = N_VALUES)
   tab <- data.frame(N = format(keys$N, big.mark = ",", trim = TRUE),
-                    delta = fmt(keys$delta, 2))
+                    delta = fmt(keys$delta, 2, leading_zero = TRUE))
   tab$N[duplicated(keys$N)] <- ""
   for (tau in TAU_VALUES) for (rho in c(1, .8, .6)) {
     z <- logistic_summary[logistic_summary$tau == tau & logistic_summary$rho == rho, ]
@@ -747,9 +844,9 @@ if (RUN_STUDY1) {
   repetitions <- unique(logistic_summary$n_total)
   stopifnot(length(repetitions) == 1L)
   note <- paste0(
-    "$N$ = sample size; $\\delta$ = direct group effect on the matching variable; ",
-    "$\\rho$ = matching-variable reliability; ",
-    "$\\tau$ = true average item-bias effect. ",
+    "$N$ = sample size; $\\tau$ = true average item-bias effect; ",
+    "$\\delta$ = direct group effect on the matching variable; ",
+    "$\\rho$ = matching-variable reliability. ",
     "Each cell reports the proportion of valid replications in which the ",
     "two-sided test rejects at the .05 level, representing the Type~I error ",
     "rate at $\\tau=0$ and power otherwise. Each condition uses ",
@@ -773,17 +870,17 @@ if (RUN_STUDY2) {
     "Unadjusted denotes the nominal 95\\% DID confidence interval; ",
     "normal-distribution and distribution-free denote the intervals based ",
     "on the corresponding sensitivity bounds. Coverage is the proportion ",
-    "of intervals containing $\\tau$; length is mean interval length. ")
+    "of intervals containing $\\tau$; length is mean interval length. ",
+    "Rejection is the proportion of intervals excluding zero")
   repetitions <- unique(main$n_total)
   stopifnot(length(repetitions) == 1L)
   repetitions <- format(repetitions, big.mark = ",", trim = TRUE)
 
   # S3: additional effect sizes, with eta = eta_0.
   keys <- expand.grid(eta_true = ETA_TRUE_VALUES, N = N_VALUES, tau = c(0, -.10))
-  tab <- data.frame(tau = fmt(keys$tau, 2),
-    N = format(keys$N, big.mark = ",", trim = TRUE), eta = fmt(keys$eta_true, 2))
+  tab <- data.frame(N = format(keys$N, big.mark = ",", trim = TRUE),
+                    eta = fmt(keys$eta_true, 2))
   groups <- paste(keys$tau, keys$N)
-  tab$tau[duplicated(groups)] <- ""
   tab$N[duplicated(groups)] <- ""
   for (method in METHODS) {
     z <- main[main$method == method, ]
@@ -791,28 +888,34 @@ if (RUN_STUDY2) {
                    paste(z$tau, z$N, z$eta_true))
     stopifnot(!anyNA(index))
     tab[[paste0("coverage", ncol(tab))]] <- fmt(z$coverage[index], 4)
-    tab[[paste0("length", ncol(tab))]] <- fmt(z$mean_length[index])
+    tab[[paste0("length", ncol(tab))]] <- fmt(z$mean_length[index], leading_zero = TRUE)
+    tab[[paste0("rejection", ncol(tab))]] <- fmt(z$rejection[index], 4)
   }
   note <- paste0(
-    "$\\tau$ = true average item-bias effect; $N$ = sample size; ",
-    "$\\eta_0$ = supremum of the absolute difference between the test- and ",
-    "anchor-item IRFs under the reference-group condition. ",
-    "$\\eta$ is the specified sensitivity parameter; $\\mu$ is the standardized ",
-    "latent mean difference between the focal and reference groups. ",
-    interval_note, "Each condition is based on ", repetitions,
-    " replications, with $\\eta=\\eta_0$ and $\\mu=-.5$.")
+    "$N$ = sample size; $\\eta_0$ = supremum of the absolute difference ",
+    "between the test- and anchor-item IRFs under the reference-group ",
+    "condition; $\\tau$ = true average item-bias effect. ",
+    interval_note, ", representing the Type~I error rate at $\\tau=0$ ",
+    "and power otherwise. Each condition is based on ", repetitions,
+    " replications, with $\\eta=\\eta_0$ and $\\mu=-0.5$. ",
+    "The same simulated samples were used for all three intervals.")
   write_table(tab, c(
-    " & & & \\multicolumn{2}{c}{Unadjusted} & \\multicolumn{2}{c}{Normal-distribution} & \\multicolumn{2}{c}{Distribution-free} \\\\",
-    "\\cmidrule(lr){4-5}\\cmidrule(lr){6-7}\\cmidrule(lr){8-9}",
-    "$\\tau$ & $N$ & $\\eta_0$ & Coverage & Length & Coverage & Length & Coverage & Length \\\\") ,
+    " & & \\multicolumn{3}{c}{Unadjusted} & \\multicolumn{3}{c}{Normal-distribution} & \\multicolumn{3}{c}{Distribution-free} \\\\",
+    "\\cmidrule(lr){3-5}\\cmidrule(lr){6-8}\\cmidrule(lr){9-11}",
+    "$N$ & $\\eta_0$ & Coverage & Length & Rejection & Coverage & Length & Rejection & Coverage & Length & Rejection \\\\") ,
     "Interval Performance at Additional Effect Sizes in Study~2",
     "tab:sim2_other_effects", note, file.path(folder, "table_S3_other_effects.tex"),
-    breaks = seq(5L, 21L, by = 4L))
+    breaks = seq(5L, 21L, by = 4L),
+    panel_titles = c("1" = "Panel A: $\\tau=0$", "13" = "Panel B: $\\tau=-.10$"))
 
   # S4: eta choices applied to the same draws at tau = -.05 and eta_0 = .15.
+  repetitions <- unique(sensitivity$n_total[sensitivity$tau == -.05 &
+                                            sensitivity$eta_true == .15])
+  stopifnot(length(repetitions) == 1L)
+  repetitions <- format(repetitions, big.mark = ",", trim = TRUE)
   keys <- expand.grid(eta_multiplier = ETA_MULTIPLIERS, N = N_VALUES)
   tab <- data.frame(N = format(keys$N, big.mark = ",", trim = TRUE),
-                    ratio = fmt(keys$eta_multiplier, 2))
+                    ratio = fmt(keys$eta_multiplier, 2, leading_zero = TRUE))
   tab$N[duplicated(keys$N)] <- ""
   for (method in METHODS) {
     z <- sensitivity[sensitivity$tau == -.05 & sensitivity$eta_true == .15 &
@@ -820,22 +923,23 @@ if (RUN_STUDY2) {
     index <- match(paste(keys$N, keys$eta_multiplier), paste(z$N, z$eta_multiplier))
     stopifnot(!anyNA(index))
     tab[[paste0("coverage", ncol(tab))]] <- fmt(z$coverage[index], 4)
-    tab[[paste0("length", ncol(tab))]] <- fmt(z$mean_length[index])
+    tab[[paste0("length", ncol(tab))]] <- fmt(z$mean_length[index], leading_zero = TRUE)
+    tab[[paste0("rejection", ncol(tab))]] <- fmt(z$rejection[index], 4)
   }
   note <- paste0(
     "$N$ = sample size; $\\eta/\\eta_0$ = ratio of the specified sensitivity ",
     "parameter to the supremum of the absolute difference between the test- ",
     "and anchor-item IRFs under the reference-group condition. ",
-    "$\\tau$ is the true average item-bias effect; $\\mu$ is the standardized ",
-    "latent mean difference between the focal and reference groups. ",
-    interval_note, "For each $N$, the same ", repetitions,
-    " simulated samples were used across values of $\\eta$, with ",
-    "$\\tau=-.05$, $\\eta_0=.15$, and $\\mu=-.5$. ",
+    "$\\tau$ = true average item-bias effect. ",
+    interval_note, ", representing power at $\\tau=-.05$. ",
+    "For each $N$, the same ", repetitions,
+    " simulated samples were used across all three intervals and values of $\\eta$, with ",
+    "$\\tau=-.05$, $\\eta_0=.15$, and $\\mu=-0.5$. ",
     "The unadjusted interval does not depend on $\\eta$.")
   write_table(tab, c(
-    " & & \\multicolumn{2}{c}{Unadjusted} & \\multicolumn{2}{c}{Normal-distribution} & \\multicolumn{2}{c}{Distribution-free} \\\\",
-    "\\cmidrule(lr){3-4}\\cmidrule(lr){5-6}\\cmidrule(lr){7-8}",
-    "$N$ & $\\eta/\\eta_0$ & Coverage & Length & Coverage & Length & Coverage & Length \\\\") ,
+    " & & \\multicolumn{3}{c}{Unadjusted} & \\multicolumn{3}{c}{Normal-distribution} & \\multicolumn{3}{c}{Distribution-free} \\\\",
+    "\\cmidrule(lr){3-5}\\cmidrule(lr){6-8}\\cmidrule(lr){9-11}",
+    "$N$ & $\\eta/\\eta_0$ & Coverage & Length & Rejection & Coverage & Length & Rejection & Coverage & Length & Rejection \\\\") ,
     "Sensitivity to the Specified Value of $\\eta$ in Study~2",
     "tab:sim2_eta_choice", note, file.path(folder, "table_S4_eta_choice.tex"),
     breaks = c(8L, 15L))
@@ -843,7 +947,7 @@ if (RUN_STUDY2) {
 
 # 8. Numerical checks and run record ------------------------------------------
 # Check key identities on the actual results, without generating new datasets.
-if (RUN_STUDY2) {
+if (RUN_STUDY2 && RUN_MODE != "presentation") {
   for (i in unique(main$condition_id)) {
     x <- main[main$condition_id == i, ]
     x <- x[match(METHODS, x$method), ]
@@ -860,20 +964,38 @@ if (RUN_STUDY2) {
 }
 
 # Verify the HC3 shortcut against its matrix definition on a fixed small example.
-group_check <- rep(c(0, 1), c(19, 31))
-anchor_check <- rep(c(0, 1, 1, 0, 1), 10)
-test_check <- rep(c(1, 0, 1, 1, 0), 10)
-X <- cbind(1, group_check)
-ols <- lm(I(test_check - anchor_check) ~ group_check)
-bread <- solve(crossprod(X))
-hc3 <- bread %*% crossprod(X, X * (residuals(ols) / (1 - hatvalues(ols)))^2) %*% bread
-check <- fit_did(test_check, anchor_check, group_check)
-stopifnot(abs(check["estimate"] - coef(ols)[2]) < 1e-12,
-          abs(check["se"]^2 - hc3[2, 2]) < 1e-12)
-writeLines(capture.output(sessionInfo()), file.path(OUTPUT_DIR, "sessionInfo.txt"))
-writeLines(capture.output(dput(list(
+if (RUN_MODE != "presentation") {
+  group_check <- rep(c(0, 1), c(19, 31))
+  anchor_check <- rep(c(0, 1, 1, 0, 1), 10)
+  test_check <- rep(c(1, 0, 1, 1, 0), 10)
+  X <- cbind(1, group_check)
+  ols <- lm(I(test_check - anchor_check) ~ group_check)
+  bread <- solve(crossprod(X))
+  hc3 <- bread %*% crossprod(X, X * (residuals(ols) / (1 - hatvalues(ols)))^2) %*% bread
+  check <- fit_did(test_check, anchor_check, group_check)
+  stopifnot(abs(check["estimate"] - coef(ols)[2]) < 1e-12,
+            abs(check["se"]^2 - hc3[2, 2]) < 1e-12)
+}
+if (RUN_MODE == "presentation") {
+  # Keep the simulation run record intact. These settings describe rendering,
+  # not a new analysis or the provenance of the supplied summaries.
+  paths <- file.path(OUTPUT_DIR, required)
+  writeLines(capture.output(sessionInfo()),
+             file.path(OUTPUT_DIR, "presentation_sessionInfo.txt"))
+  writeLines(capture.output(dput(list(
+    run_mode = RUN_MODE, source_files = required,
+    source_md5 = setNames(unname(tools::md5sum(paths)), required),
+    figures_written = MAKE_FIGURES, figure_font = FIGURE_FONT,
+    final_figure_width_mm = FINAL_FIGURE_WIDTH_MM,
+    figure5_height_inches = FIGURE5_HEIGHT,
+    run_time = format(Sys.time(), tz = "UTC")))),
+    file.path(OUTPUT_DIR, "presentation_settings.txt"))
+} else {
+  writeLines(capture.output(sessionInfo()), file.path(OUTPUT_DIR, "sessionInfo.txt"))
+  writeLines(capture.output(dput(list(
   run_mode = RUN_MODE, alpha = ALPHA, mu = MU, n_rep_requested = N_REP,
   figure_font = FIGURE_FONT, final_figure_width_mm = FINAL_FIGURE_WIDTH_MM,
+  figure5_height_inches = FIGURE5_HEIGHT,
   N = N_VALUES, tau = TAU_VALUES, eta_true = ETA_TRUE_VALUES,
   eta_multipliers = ETA_MULTIPLIERS, study1_saved = STUDY1_SAVED,
   study2_saved = STUDY2_SAVED, empirical_eta = EMPIRICAL_ETA,
@@ -881,4 +1003,5 @@ writeLines(capture.output(dput(list(
   intervals_clipped = FALSE, sensitivity_inputs_fixed = TRUE,
   study1_seed = 2026, study2_seed = 2027, seed_increment = 1009,
   run_time = format(Sys.time(), tz = "UTC")))), file.path(OUTPUT_DIR, "settings.txt"))
+}
 message("Finished. Results: ", normalizePath(OUTPUT_DIR))
