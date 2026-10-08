@@ -27,7 +27,7 @@ Rscript reproduce_did_study.R empirical
 - `study2/main_summary.csv`
 - `study2/eta_summary.csv`
 
-It generates no samples and leaves existing numerical results and analysis records unchanged. Missing summaries cause an error, not a new simulation run. Study 2 summaries must include coverage, mean interval length, and rejection rates.
+It generates no samples and leaves existing numerical results and analysis records unchanged. Missing summaries cause an error, not a new simulation run. Study 2 summaries must include coverage and mean interval length. Rejection-rate columns in older Study 2 summaries are ignored.
 
 `outputs` reads `study1/simulation.rds` and `study2/simulation.rds` under `OUTPUT_DIR`. Set `STUDY1_SAVED` and `STUDY2_SAVED` for other compatible RDS paths. Fresh simulation runs replace generated results; change `OUTPUT_DIR` to retain an earlier run.
 
@@ -37,7 +37,7 @@ Other modes are `study1`, `study2`, `all` (both studies and the illustration), a
 
 For the illustration, obtain the Korean PIAAC public-use CSV separately and set `PIAAC_FILE`. The semicolon-delimited file must contain `AGEG10LFS`, `E320004S`, `E320003S`, and `PVLIT1`–`PVLIT10`. Analyses are unweighted; sensitivity inputs are treated as fixed.
 
-Results are saved under `results/study1/`, `results/study2/`, and `results/empirical/`. Figure 5 shows coverage (A), mean interval length (B), and rejection rates (C). Tables S3 and S4 report all three measures. LaTeX tables use the manuscript's CUP macros.
+Results are saved under `results/study1/`, `results/study2/`, and `results/empirical/`. Figure 5 shows coverage (A) and mean interval length (B). Tables S3 and S4 report these two measures. LaTeX tables use the manuscript's CUP macros.
 
 Insert Figures 4 and 5 at the same width. The default final width is 144 mm; adjust `FINAL_FIGURE_WIDTH_MM` if needed. Set `MAKE_FIGURES <- FALSE` to skip PDF output.
 
