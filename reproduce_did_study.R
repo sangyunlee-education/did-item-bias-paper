@@ -25,15 +25,18 @@ MU <- -.5                    # Focal-group latent-trait mean; the reference-grou
 N_VALUES <- c(500L, 1000L, 2000L)
 TAU_VALUES <- c(0, -.05, -.10)
 ETA_TRUE_VALUES <- c(.05, .10, .15)
+
 # Supplementary sensitivity inputs, applied to the same samples at tau = -.05
 # and actual IRF discrepancy .15. Main analyses use the data-generating values.
 ETA_SPECIFIED <- c(.075, .150, .225)
 MU_SPECIFIED <- c(-.25, -.50, -.75)
 SENSITIVITY_TAU <- -.05
 SENSITIVITY_TRUE_ETA <- .15
+
 # Empirical inputs chosen slightly above the reference values .0329 and .72.
 EMPIRICAL_ETA <- .035
 EMPIRICAL_MU <- -.75
+
 # Internal interval keys; figures and tables set their own display order.
 METHODS <- c("Unadjusted", "Normal", "Distribution-free")
 Z <- qnorm(1 - ALPHA / 2)
@@ -44,6 +47,7 @@ if (!file.exists(PIAAC_FILE)) stop("Korean PIAAC CSV not found: ", PIAAC_FILE)
 dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
 
 # 2. Shared statistical calculations ----------------------------------------
+
 # Integrate a function over N(mu, 1). Used for calibration and population checks.
 normal_mean <- function(fun, mu = MU) {
   integrate(function(theta) fun(theta) * dnorm(theta, mu, 1),
@@ -223,6 +227,7 @@ run_study1 <- function() {
       interval_summary(x$did, x$did_se, keys$tau[i]))
   }
   did_summary <- do.call(rbind, did_rows)
+
   # Summarize logistic-regression rejection rates for each crossed condition.
   logistic_rows <- vector("list", nrow(design1))
   for (i in seq_len(nrow(design1))) {
@@ -256,6 +261,7 @@ run_study2 <- function() {
   dir.create(folder, recursive = TRUE, showWarnings = FALSE)
   design2 <- expand.grid(N = N_VALUES, tau = TAU_VALUES, eta_true = ETA_TRUE_VALUES,
                         KEEP.OUT.ATTRS = FALSE)
+
   # Fixed condition identifiers determine the random seeds.
   design2$condition_id <- 9L + seq_len(nrow(design2))
   design2$gamma <- calibration$gamma[match(design2$tau, calibration$tau)]
@@ -317,6 +323,7 @@ run_study2 <- function() {
                    stringsAsFactors = FALSE),
         interval_summary(x$did, x$did_se, truth = d$tau, bound = bounds[j]))
     }
+
     # Check the ordinary CI for its own estimand, population DID.
     # Its coverage can be nominal even when coverage of tau fails.
     diagnostics[[i]] <- cbind(d,
@@ -387,6 +394,7 @@ run_study2 <- function() {
     }
   }
   joint <- do.call(rbind, rows)
+
   # The CSV includes all settings; S4 displays each distinct interval only once.
   write.csv(joint, file.path(folder, "eta_mu_summary.csv"), row.names = FALSE)
   writeLines(capture.output(dput(list(
@@ -406,12 +414,14 @@ run_empirical <- function() {
   if (!file.exists(PIAAC_FILE)) stop("PIAAC CSV not found: ", PIAAC_FILE)
   folder <- file.path(OUTPUT_DIR, "empirical")
   dir.create(folder, recursive = TRUE, showWarnings = FALSE)
+
   # The illustration is unweighted; standard errors omit the complex survey design.
   piaac <- read.csv(PIAAC_FILE, sep = ";", dec = ".",
                     na.strings = c(".", ".n", ".v"), check.names = FALSE)
   pv_names <- paste0("PVLIT", 1:10)
   required <- c("AGEG10LFS", "E320004S", "E320003S", pv_names)
   if (!all(required %in% names(piaac))) stop("Required PIAAC columns are missing.")
+
   # Select the two age groups and recode the scored item responses.
   # Raw item scores: 1 = correct, 7 = incorrect, 0 = omitted.
   item_names <- c("E320004S", "E320003S")
@@ -441,6 +451,7 @@ run_empirical <- function() {
       sum(dat$group == 1) != 251) {
     stop("Analytic sample differs from the manuscript; inspect the input data.")
   }
+
   # Fit DIF using each plausible value on its original scale.
   # Pool the ten group coefficients using multiple-imputation combining rules.
   pv_results <- data.frame(PV = pv_names, n = 0, estimate = 0, variance = 0,
@@ -463,10 +474,12 @@ run_empirical <- function() {
     pv_results$variance_ratio[i] <- var(focal) / var(reference)
     pv_results$warning[i] <- logistic$warning
   }
+
   # Pool the ten DIF estimates using Rubin's combining rules.
   m <- nrow(pv_results)
   logistic_estimate <- mean(pv_results$estimate)
   logistic_se <- sqrt(mean(pv_results$variance) + (1 + 1 / m) * var(pv_results$estimate))
+
   # Estimate DID from paired responses and report both methods on their own scales.
   did <- fit_did(dat$y_test, dat$y_anchor, dat$group)
   estimates <- c(logistic_estimate, unname(did["estimate"]))
@@ -476,7 +489,20 @@ run_empirical <- function() {
     lower = estimates - Z * standard_errors, upper = estimates + Z * standard_errors,
     p = 2 * pnorm(abs(estimates / standard_errors), lower.tail = FALSE))
 
-  # Use the PV mean difference as reference information, not as a fixed input.
+  # Calculate reference information; the specified sensitivity inputs remain fixed.
+  irf_difference <- function(theta) {
+    plogis(1.7 * 1.338 * (theta - .399)) -
+      plogis(1.7 * 1.446 * (theta - .437))
+  }
+  theta_grid <- seq(-10, 10, length.out = 2001L)
+  peak <- which.max(abs(irf_difference(theta_grid)))
+  stopifnot(peak > 1L, peak < length(theta_grid))
+  eta_reference <- optimize(
+    function(theta) abs(irf_difference(theta)),
+    interval = theta_grid[c(peak - 1L, peak + 1L)],
+    maximum = TRUE, tol = 1e-12
+  )$objective
+
   mu_reference <- mean(pv_results$mu)
   bounds <- c(0, EMPIRICAL_ETA * (4 * pnorm(abs(EMPIRICAL_MU) / 2) - 2),
               2 * EMPIRICAL_ETA)
@@ -487,11 +513,13 @@ run_empirical <- function() {
     lower = unname(did["estimate"] - Z * did["se"]) - bounds,
     upper = unname(did["estimate"] + Z * did["se"]) + bounds)
   reference_information <- data.frame(
+    maximum_absolute_irf_difference = eta_reference,
     absolute_standardized_mean_difference = abs(mu_reference),
     eta_assumed = EMPIRICAL_ETA,
     absolute_mu_assumed = abs(EMPIRICAL_MU))
   write.csv(reference_information,
             file.path(folder, "sensitivity_inputs.csv"), row.names = FALSE)
+
   # Write the empirical estimates, sensitivity intervals, and supporting inputs.
   # Interval endpoints are calculated before rounding for presentation.
   report <- vapply(seq_len(nrow(empirical_sensitivity)), function(i) {
@@ -524,7 +552,7 @@ run_empirical()
 
 DEVICE_WIDTH <- 9.4
 DEVICE_HEIGHT <- 8.85
-FIGURE5_HEIGHT <- 10.5  # Eta rows and sample-size columns; coverage versus length.
+FIGURE5_HEIGHT <- 10.5
 DEVICE_POINTSIZE <- 12
 stopifnot(length(FINAL_FIGURE_WIDTH_MM) == 1L,
           is.finite(FINAL_FIGURE_WIDTH_MM), FINAL_FIGURE_WIDTH_MM > 0)
@@ -566,6 +594,7 @@ draw_legend <- function(labels, pch, fills, colors = "black",
   label_width <- strwidth(labels, cex = cex)
   key_width <- strwidth(if (is.null(line_types)) "M" else "MM", cex = cex)
   label_gap <- strwidth(" ", cex = cex)
+
   # Marker-only legends use wider gaps; line legends separate DID from Logistic.
   gap_multiplier <- if (is.null(line_types)) 2 else 1
   entry_gap <- strwidth("   ", cex = cex) * gap_multiplier
@@ -615,7 +644,8 @@ make_figure4 <- function() {
   widths <- unname(LINE_LWD[c("primary", "secondary", "secondary", "secondary")])
   for (block in 1:2) {
     blank_strip()
-    text(0, .5, if (block == 1) "A" else "B", adj = c(0, .5), cex = TEXT_CEX["panel"], font = 2)
+    text(0, .5, if (block == 1) "A" else "B", adj = c(0, .5),
+         cex = TEXT_CEX["panel"], font = 2)
     text(
       .055, .5,
       if (block == 1) {
@@ -633,8 +663,11 @@ make_figure4 <- function() {
            xlab = "", ylab = "", xaxt = "n", yaxt = "n", bty = "l")
       abline(h = c(.25, .5, .75, 1), col = "grey90", lwd = LINE_LWD["grid"])
       abline(h = .05, col = "grey60", lty = 3, lwd = LINE_LWD["reference"])
-      axis(1, at = taus, labels = c("0", "-0.05", "-0.10"), cex.axis = TEXT_CEX["tick"])
-      axis(2, at = seq(0, 1, .2), labels = c("0", ".2", ".4", ".6", ".8", "1.0"), cex.axis = TEXT_CEX["tick"])
+      axis(1, at = taus, labels = c("0", "-0.05", "-0.10"),
+           cex.axis = TEXT_CEX["tick"])
+      axis(2, at = seq(0, 1, .2),
+           labels = c("0", ".2", ".4", ".6", ".8", "1.0"),
+           cex.axis = TEXT_CEX["tick"])
       if (block == 1L) {
         mtext(bquote(italic(N) == .(format(n, big.mark = ",", trim = TRUE))),
               side = 3, line = .7, at = mean(par("usr")[1:2]),
@@ -645,17 +678,20 @@ make_figure4 <- function() {
       for (k in 1:3) {
         delta <- if (block == 1) c(0, .25, .5)[k] else 0
         rho <- if (block == 1) 1 else c(1, .8, .6)[k]
-        z <- logistic[logistic$N == n & logistic$delta == delta & logistic$rho == rho, ]
+        z <- logistic[logistic$N == n & logistic$delta == delta &
+                        logistic$rho == rho, ]
         series[[k + 1]] <- z$rejection[match(taus, z$tau)]
       }
       stopifnot(all(is.finite(unlist(series))),
                 all(unlist(series) >= 0 & unlist(series) <= 1))
       for (j in c(2, 3, 4, 1)) {
-        lines(taus, series[[j]], col = colors[j], lty = line_types[j], lwd = widths[j])
+        lines(taus, series[[j]], col = colors[j],
+              lty = line_types[j], lwd = widths[j])
       }
       for (j in c(2, 3, 4, 1)) {
         points(taus, series[[j]], col = colors[j], pch = symbols[j],
-               bg = if (j == 1) "black" else "white", cex = POINT_CEX, lwd = LINE_LWD["marker"])
+               bg = if (j == 1) "black" else "white", cex = POINT_CEX,
+               lwd = LINE_LWD["marker"])
       }
     }
     if (block == 2L) {
@@ -665,10 +701,12 @@ make_figure4 <- function() {
     blank_strip()
     labels <- if (block == 1) {
       expression(DID, paste("Logistic: ", delta == 0),
-                 paste("Logistic: ", delta == .25), paste("Logistic: ", delta == .50))
+                 paste("Logistic: ", delta == .25),
+                 paste("Logistic: ", delta == .50))
     } else {
       expression(DID, paste("Logistic: ", rho == 1.00),
-                 paste("Logistic: ", rho == .80), paste("Logistic: ", rho == .60))
+                 paste("Logistic: ", rho == .80),
+                 paste("Logistic: ", rho == .60))
     }
     draw_legend(labels, symbols, c("black", rep("white", 3)),
                 colors, line_types, widths)
@@ -688,7 +726,8 @@ make_figure5 <- function() {
   eta_plot <- c(.05, .10, .15)
   n_plot <- c(500, 1000, 2000)
   method_plot <- c("Unadjusted", "Distribution-free", "Normal")
-  method_labels <- c("Unadjusted", "Distribution-free bound", "Normal-distribution bound")
+  method_labels <- c("Unadjusted", "Distribution-free bound",
+                     "Normal-distribution bound")
   method_symbols <- c(21, 24, 22)
   method_fills <- c("white", "white", "black")
   required_columns <- c("tau", "eta_true", "N", "method", "coverage", "mean_length")
@@ -721,7 +760,8 @@ make_figure5 <- function() {
   for (i in seq_along(eta_plot)) {
     eta <- eta_plot[i]
     blank_strip()
-    text(0, .5, LETTERS[i], adj = c(0, .5), font = 2, cex = TEXT_CEX["panel"])
+    text(0, .5, LETTERS[i], adj = c(0, .5), font = 2,
+         cex = TEXT_CEX["panel"])
     text(.055, .5, bquote(eta == .(sub("^0", "", sprintf("%.2f", eta)))),
          adj = c(0, .5), cex = TEXT_CEX["title"])
     for (j in seq_along(n_plot)) {
@@ -739,15 +779,9 @@ make_figure5 <- function() {
       abline(h = setdiff(y_ticks, .95), col = "grey92", lwd = LINE_LWD["grid"])
       abline(h = .95, col = "grey50", lty = 3, lwd = LINE_LWD["reference"])
       axis(1, at = x_ticks, labels = FALSE)
-
       if (i == length(eta_plot)) {
-        mtext(
-          x_labels,
-          side = 1,
-          at = x_ticks,
-          line = .6,
-          cex = TEXT_CEX["tick"]
-        )
+        mtext(x_labels, side = 1, at = x_ticks, line = .6,
+              cex = TEXT_CEX["tick"])
       }
       axis(2, at = y_ticks, labels = if (j == 1L) y_labels else FALSE,
            cex.axis = TEXT_CEX["tick"])
@@ -806,7 +840,8 @@ make_study1_tables <- function() {
   stopifnot(length(pooled) == 1L)
   note <- paste0(
     "$N$ = sample size; $\\tau$ = true item-bias effect. ",
-    "RMSE = root-mean-square error. Bias and RMSE are relative to $\\tau$. ",
+    "Bias is the mean estimated DID minus $\\tau$. ",
+    "RMSE = root-mean-square error relative to $\\tau$. ",
     "SE/SD is the ratio of the mean estimated standard error to the empirical ",
     "standard deviation of the pooled estimates. Coverage is the proportion ",
     "of nominal 95\\% confidence intervals containing $\\tau$. ",
@@ -850,7 +885,7 @@ make_study1_tables <- function() {
     " & & \\multicolumn{3}{c}{$\\tau=0$} & \\multicolumn{3}{c}{$\\tau=-.05$} & \\multicolumn{3}{c}{$\\tau=-.10$} \\\\",
     "\\cmidrule(lr){3-5}\\cmidrule(lr){6-8}\\cmidrule(lr){9-11}",
     "$N$ & $\\delta$ & \\multicolumn{3}{c}{$\\rho$} & \\multicolumn{3}{c}{$\\rho$} & \\multicolumn{3}{c}{$\\rho$} \\\\",
-    " & & 1.00 & .80 & .60 & 1.00 & .80 & .60 & 1.00 & .80 & .60 \\\\") ,
+    " & & 1.00 & .80 & .60 & 1.00 & .80 & .60 & 1.00 & .80 & .60 \\\\"),
     "Rejection Rates for Logistic-Regression DIF in Study~1", "tab:sim1_logistic",
     note, file.path(folder, "table_S2_logistic.tex"), breaks = c(4L, 7L))
 }
@@ -889,8 +924,10 @@ make_study2_tables <- function() {
   }
   note <- paste0(
     "$N$ = sample size; $\\eta$ = supremum of the absolute difference between ",
-    "the test- and anchor-item IRFs under the reference-group condition; ",
+    "the IRFs of the test and anchor items under the reference-group condition; ",
     "$\\tau$ = true item-bias effect. ",
+    "$\\widetilde{\\eta}$ and $\\widetilde{\\mu}$ = specified sensitivity inputs; ",
+    "$\\mu$ = focal-group mean on the normalized latent-trait scale. ",
     interval_note, " Each condition is based on ", repetitions,
     " replications, with $\\widetilde{\\eta}=\\eta$ and ",
     "$\\widetilde{\\mu}=\\mu=-.5$. ",
@@ -898,7 +935,7 @@ make_study2_tables <- function() {
   write_table(tab, c(
     " & & \\multicolumn{2}{c}{Unadjusted} & \\multicolumn{2}{c}{Distribution-free} & \\multicolumn{2}{c}{Normal-distribution} \\\\",
     "\\cmidrule(lr){3-4}\\cmidrule(lr){5-6}\\cmidrule(lr){7-8}",
-    "$N$ & $\\eta$ & Coverage & Length & Coverage & Length & Coverage & Length \\\\") ,
+    "$N$ & $\\eta$ & Coverage & Length & Coverage & Length & Coverage & Length \\\\"),
     "Interval Performance at Additional Effect Sizes in Study~2",
     "tab:sim2_other_effects", note, file.path(folder, "table_S3_other_effects.tex"),
     breaks = seq(4L, 16L, by = 3L),
@@ -930,12 +967,12 @@ make_study2_tables <- function() {
   stopifnot(length(repetitions) == 1L)
   note <- paste0(
     "$N$ = sample size; $\\widetilde{\\eta}$ and $\\widetilde{\\mu}$ = ",
-    "specified sensitivity inputs; ",
-    "$\\tau$ = true item-bias effect. ",
+    "specified sensitivity inputs; $\\tau$ = true item-bias effect; ",
+    "$\\mu$ = focal-group mean on the normalized latent-trait scale. ",
     "Panels A--C report results for the unadjusted nominal 95\\% DID confidence interval and ",
     "the intervals based on the distribution-free and normal-distribution bounds, respectively. ",
     "Coverage is the proportion of intervals containing $\\tau$; length is mean interval length. ",
-    "A dash indicates a sensitivity parameter not used by the interval. ",
+    "A dash indicates a sensitivity input not used by the interval. ",
     "For each $N$, the same ", format(repetitions, big.mark = ",", trim = TRUE),
     " simulated samples were used across all three intervals and all 9 combinations, with $\\tau=-.05$, ",
     "the actual supremum of the absolute IRF difference $\\eta=.15$, ",
@@ -943,7 +980,7 @@ make_study2_tables <- function() {
   write_table(tab, c(
     " & & \\multicolumn{2}{c}{$N=500$} & \\multicolumn{2}{c}{$N=1{,}000$} & \\multicolumn{2}{c}{$N=2{,}000$} \\\\",
     "\\cmidrule(lr){3-4}\\cmidrule(lr){5-6}\\cmidrule(lr){7-8}",
-    "$\\widetilde{\\eta}$ & $\\widetilde{\\mu}$ & Coverage & Length & Coverage & Length & Coverage & Length \\\\") ,
+    "$\\widetilde{\\eta}$ & $\\widetilde{\\mu}$ & Coverage & Length & Coverage & Length & Coverage & Length \\\\"),
     "Sensitivity to the Specified Values of $\\widetilde{\\eta}$ and $\\widetilde{\\mu}$ in Study~2",
     "tab:sim2_eta_choice", note, file.path(folder, "table_S4_eta_mu_choice.tex"),
     breaks = c(2L, 5L, 8L, 11L),
